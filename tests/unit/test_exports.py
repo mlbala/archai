@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+import re
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+import pytest
+import yaml
+
+from archai.application import service
+from archai.application.designer import build_graph
+from archai.compilers.export import export_revision, litellm_yaml, normalize_formats
+from archai.compilers.report import complete_document, component_document
+from archai.compilers.scene import to_png, to_svg
+from archai.compilers.terraform import apim_policy_xml, compile_infrastructure
+from archai.compilers.views import all_views
+
+REQUIREMENTS = Path("examples/azure-enterprise-rag/requirements.yaml")
+
+
+def design_for(tmp_path: Path, profile: str | None = None, source: Path = REQUIREMENTS):
+    store, revision = service.run_generation(
+        project=f"exp-{profile or 'default'}",
+        scope=service.auto_scope(),
+        output_dir=tmp_path,
+        files=[source],
+        idea=None,
+        stdin_enabled=False,
+        answers=None,
+        profile=profile,
+        region=None,
+        target_providers=None,
+        topology=None,
+        archetypes=[],
+        allow_assumptions=False,
+        offline=True,
+    )
+    return store, revision, store.load_design(revision)
+
+
+def test_litellm_uses_provider_prefixes_and_fallback_groups(tmp_path):
+    _, _, design = design_for(tmp_path)
+    config = yaml.safe_load(litellm_yaml(design))
+    names = [entry["model_name"] for entry in config["model_list"]]
+    assert "enterprise-chat" in names and "enterprise-chat-fallback-1" in names
+    models = {
+        entry["model_name"]: entry["litellm_params"]["model"] for entry in config["model_list"]
+    }
+    assert models["enterprise-chat"].startswith("azure/")
+    assert models["enterprise-chat-fallback-1"].startswith("bedrock/")
+    assert config["router_settings"]["fallbacks"] == [
+        {"enterprise-chat": ["enterprise-chat-fallback-1"]}
+    ]
+    assert not any("fallback" in name for name in names if name.startswith("enterprise-embedding"))
+    for entry in config["model_list"]:
+        for key, value in entry["litellm_params"].items():
+            if "key" in key or "api_base" in key:
+                assert str(value).startswith("os.environ/")
+
+
+def _terraform_consistency(files: dict[str, str]) -> None:
+    code = "\n".join(text for path, text in files.items() if path.endswith(".tf"))
+    assert code.count("{") == code.count("}")
+    declared_vars = set(re.findall(r'variable "([a-z_]+)"', code))
+    used_vars = set(re.findall(r"\bvar\.([a-z_]+)", code))
+    assert used_vars <= declared_vars, used_vars - declared_vars
+    resources = set(re.findall(r'resource "([a-z0-9_]+)" "([a-z0-9_]+)"', code))
+    data = set(re.findall(r'data "([a-z0-9_]+)" "([a-z0-9_]+)"', code))
+    for kind, name in re.findall(
+        r"(?<![.\w])((?:azurerm|aws|random)_[a-z0-9_]+)\.([a-z0-9_]+)\b", code
+    ):
+        if name in {"id", "name", "arn", "json"}:
+            continue
+        assert (kind, name) in resources, f"{kind}.{name} is not declared"
+    for kind, name in re.findall(r"\bdata\.([a-z0-9_]+)\.([a-z0-9_]+)\b", code):
+        assert (kind, name) in data, f"data.{kind}.{name} is not declared"
+    literal_secrets = re.findall(r'(?i)\b\w*(password|secret|api_key)\w*\s*=\s*"[^"]+"', code)
+    assert not literal_secrets
+    assert "apply" not in code.split("#")[0]
+
+
+@pytest.mark.parametrize("profile", ["azure-aca", "azure-aks", "aws-eks"])
+def test_terraform_roots_are_self_consistent_and_secret_free(tmp_path, profile):
+    _, _, design = design_for(tmp_path, profile)
+    files = compile_infrastructure(design)
+    assert "infrastructure/primary/main.tf" in files
+    _terraform_consistency(files)
+    assert "service_images" in files["infrastructure/primary/variables.tf"] or profile == "aws-eks"
+    if profile != "azure-aca":
+        manifests = [path for path in files if path.startswith("workloads/kubernetes/")]
+        assert manifests
+        documents = [
+            doc
+            for path in manifests
+            if path.endswith(".yaml")
+            for doc in yaml.safe_load_all(files[path])
+        ]
+        kinds = {doc["kind"] for doc in documents}
+        assert {"Deployment", "ScaledObject", "HorizontalPodAutoscaler"} <= kinds
+
+
+def test_agnostic_profile_has_no_terraform(tmp_path):
+    _, _, design = design_for(tmp_path, "agnostic")
+    assert compile_infrastructure(design) == {}
+
+
+def test_apim_policy_and_views_are_valid_and_renderable(tmp_path):
+    _, _, design = design_for(tmp_path)
+    ET.fromstring(apim_policy_xml(design))
+    graph = build_graph(design)
+    views = all_views(design, graph)
+    keys = {view.key for view in views}
+    assert {
+        "architecture",
+        "request",
+        "oauth-user",
+        "oauth-service",
+        "deployment",
+        "budget",
+    } <= keys
+    for view in views:
+        ET.fromstring(to_svg(view.scene))
+        assert view.mermaid.split("\n", 1)[0] in {
+            "flowchart LR",
+            "sequenceDiagram",
+            "stateDiagram-v2",
+        }
+    assert to_png(views[0].scene).startswith(b"\x89PNG")
+
+
+def test_documents_are_substantive(tmp_path):
+    _, _, design = design_for(tmp_path)
+    graph = build_graph(design)
+    identity = component_document("auth", design, graph, [])
+    assert "authorization_code_pkce" in identity and "client_credentials" in identity
+    assert "Roles and permissions" in identity
+    system = component_document("system", design, graph, [])
+    assert "Microservice catalog" in system and "```mermaid" in system
+    security = component_document("security", design, graph, [])
+    assert "LLM01:2025" in security
+    complete = complete_document(design, graph, [])
+    assert "Requirements traceability" in complete
+    assert "Executive summary" in complete
+    assert complete.count("<!-- archai:diagram architecture -->") == 1
+
+
+def test_component_export_is_scoped(tmp_path):
+    store, revision, _ = design_for(tmp_path)
+    bundle, manifest = export_revision(store, revision, normalize_formats("core"), ["guard"])
+    paths = {item.path for item in manifest.artifacts}
+    assert "documents/Guardrails_Design.md" in paths
+    assert "policies/guardrails.yaml" in paths
+    assert "Complete_AI_System_Design.md" not in paths
+    assert "litellm.yaml" not in paths
+    assert not any(path.startswith("infrastructure/") for path in paths)
+    assert (bundle / "diagrams/guardrails.mmd").exists()
+
+
+def test_full_pdf_export(tmp_path):
+    store, revision, _ = design_for(tmp_path)
+    bundle, manifest = export_revision(
+        store, revision, normalize_formats("pdf,md"), [*service.auto_scope()]
+    )
+    pdfs = [item.path for item in manifest.artifacts if item.path.endswith(".pdf")]
+    assert "Complete_AI_System_Design.pdf" in pdfs
+    assert len(pdfs) >= 15
+    assert not [item for item in manifest.artifacts if item.status == "failed"]
+    assert (bundle / "Complete_AI_System_Design.pdf").stat().st_size > 50_000

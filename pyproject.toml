@@ -10,19 +10,24 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
 dependencies = [
+  "anthropic>=2.3,<3",
   "filelock>=3.16,<4",
   "google-genai>=1.0,<2",
   "jinja2>=3.1,<4",
   "openai>=1.68,<3",
+  "pillow>=11,<14",
   "pydantic>=2.10,<3",
   "pydantic-settings>=2.7,<3",
+  "python-dotenv>=1.0,<2",
   "pyyaml>=6.0,<7",
+  "reportlab>=4.2,<5",
   "rich>=13.9,<15",
   "typer>=0.15,<1",
 ]
 
 [project.optional-dependencies]
-render = ["cairosvg>=2.7,<3", "pillow>=11,<14", "reportlab>=4.2,<5"]
+# Kept for compatibility; PNG/PDF rendering no longer needs Cairo.
+render = ["cairosvg>=2.7,<3"]
 dev = [
   "build>=1.2,<2",
   "hypothesis>=6.120,<7",
@@ -45,7 +50,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]
+# RUF001-003: typographic glyphs (›, –, ×, …) are intentional in terminal and document text.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.12"

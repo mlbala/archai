@@ -2,24 +2,46 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
-from functools import partial
-from html import escape
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import yaml
 
-from archai.compilers.diagram import drawio, mermaid, png, svg
-from archai.compilers.report import complete_document, component_document
+from archai.application.registry import AUTO_COMPONENTS, COMPONENTS
+from archai.compilers.diagram import drawio
+from archai.compilers.report import (
+    complete_document,
+    component_document,
+    diagram_document,
+    document_name,
+    project_complete,
+    requirements_document,
+    source_label,
+)
+from archai.compilers.scene import to_png, to_svg
+from archai.compilers.terraform import apim_policy_xml, compile_infrastructure
+from archai.compilers.views import View, all_views, views_for
 from archai.ingestion import sha256_bytes
 from archai.persistence.store import ProjectStore, json_bytes, new_bundle_id
-from archai.schemas.models import (
-    ArtifactRecord,
-    ExportBundleManifest,
-)
+from archai.schemas.models import ArtifactRecord, EnterpriseDesign, ExportBundleManifest
 
 CORE_FORMATS = {"md", "json", "yaml", "mmd", "drawio", "svg", "tf", "xml"}
 ALL_FORMATS = CORE_FORMATS | {"png", "pdf"}
+DIAGRAM_VIEWS = (
+    "system",
+    "deployment",
+    "request",
+    "ingestion",
+    "guardrails",
+    "workflow",
+    "fallback",
+    "budget",
+    "recovery",
+    "oauth",
+    "data",
+    "async",
+)
+VIEW_ALIASES = {"system": "architecture", "workflow": "workflow-", "oauth": "oauth-"}
 
 
 def normalize_formats(value: str) -> set[str]:
@@ -34,16 +56,36 @@ def normalize_formats(value: str) -> set[str]:
     return formats
 
 
+def select_views(views: list[View], scope: list[str], view: str | None) -> list[View]:
+    if view:
+        key = VIEW_ALIASES.get(view, view)
+        return [
+            item
+            for item in views
+            if item.key == key or (key.endswith("-") and item.key.startswith(key))
+        ]
+    if "doc" in scope or "diagram" in scope or set(AUTO_COMPONENTS) <= set(scope):
+        return views
+    selected: list[View] = []
+    for component in scope:
+        for item in views_for(component, views):
+            if item not in selected:
+                selected.append(item)
+    return selected
+
+
 def export_revision(
     store: ProjectStore,
     revision: int,
     formats: set[str],
     scope: list[str] | None = None,
+    view: str | None = None,
 ) -> tuple[Path, ExportBundleManifest]:
     design = store.load_design(revision)
     graph = store.load_graph(revision)
     revision_manifest = store.load_manifest(revision)
     selected_scope = scope or revision_manifest.selected_scope
+    full = "doc" in selected_scope
     diagnostics = revision_manifest.diagnostics
     bundle_id = new_bundle_id()
     root = store.root / "exports" / f"{revision:04d}" / bundle_id
@@ -59,15 +101,54 @@ def export_revision(
             ArtifactRecord(path=relative, sha256=sha256_bytes(data), status="generated")
         )
 
+    def record(relative: str, status: str, reason: str) -> None:
+        artifacts.append(ArtifactRecord(path=relative, sha256=None, status=status, reason=reason))
+
+    def covers(*components: str) -> bool:
+        return full or any(name in selected_scope for name in components)
+
+    views = all_views(design, graph)
+    selected_views = select_views(views, selected_scope, view)
+    documents: dict[str, str] = {}
+    if covers("requirements"):
+        documents["AI_Enterprise_PRD.md"] = requirements_document(design)
+    for component in selected_scope:
+        if component in {"doc", "requirements"} or component not in COMPONENTS:
+            continue
+        if component not in design.components and component != "diagram":
+            continue
+        documents[document_name(component)] = (
+            diagram_document(design, graph)
+            if component == "diagram"
+            else component_document(component, design, graph, diagnostics, views=views)
+        )
+    if full:
+        for component in COMPONENTS:
+            if component in {"doc", "requirements", "diagram"} or component in selected_scope:
+                continue
+            if component in design.components:
+                documents[document_name(component)] = component_document(
+                    component, design, graph, diagnostics, views=views
+                )
+
     if "json" in formats:
         write("enterprise_design.json", json_bytes(design))
         write("architecture_graph.json", json_bytes(graph))
         write(
             "validation_report.json",
-            json_bytes({"diagnostics": [item.model_dump(mode="json") for item in diagnostics]}),
+            json_bytes(
+                {
+                    "scope": selected_scope,
+                    "scope_valid": revision_manifest.scope_valid,
+                    "project_complete": revision_manifest.project_complete,
+                    "diagnostics": [item.model_dump(mode="json") for item in diagnostics],
+                    "verification": [item.model_dump(mode="json") for item in design.verification],
+                }
+            ),
         )
-        write("api_gateway_and_routing_config.json", _gateway_json(design))
-        if design.costs or design.capacity:
+        if covers("api", "routing") and (design.model_aliases or design.api_contracts):
+            write("api_gateway_and_routing_config.json", _gateway_json(design))
+        if covers("cost") and (design.costs or design.capacity):
             write(
                 "capacity_and_cost.json",
                 json_bytes(
@@ -76,10 +157,11 @@ def export_revision(
                         if design.capacity
                         else None,
                         "estimates": [item.model_dump(mode="json") for item in design.costs],
+                        "note": "Scenario estimates from supplied inputs; not live quotations.",
                     }
                 ),
             )
-        if design.deployment:
+        if covers("infra") and design.deployment:
             write(
                 "cloud_bom.json",
                 json_bytes(
@@ -90,99 +172,90 @@ def export_revision(
                 ),
             )
     if "md" in formats:
-        for component in selected_scope:
-            if component == "doc":
-                continue
-            if component in design.components:
-                name = component.title().replace("_", "") + "_Design.md"
-                if component == "guard":
-                    name = "Guardrails_Design.md"
-                elif component == "infra":
-                    name = "Infrastructure_Design.md"
-                write(
-                    f"documents/{name}", component_document(component, design, graph, diagnostics)
-                )
-        write("Complete_AI_System_Design.md", complete_document(design, graph, diagnostics))
-        write("integration_contracts.md", _integration_contracts(design))
+        for name, content in sorted(documents.items()):
+            target = "requirements" if name == "AI_Enterprise_PRD.md" else "documents"
+            write(f"{target}/{name}", content)
+        if full:
+            write("Complete_AI_System_Design.md", complete_document(design, graph, diagnostics))
+        if covers("api", "budget", "guard", "auth", "routing"):
+            write("integration_contracts.md", _integration_contracts(design))
     if "yaml" in formats:
-        if design.model_aliases:
-            write("litellm.yaml", _litellm_yaml(design))
-        for name, value in _policy_files(design).items():
-            write(f"policies/{name}", yaml.safe_dump(value, sort_keys=True))
-    if "xml" in formats and design.requirements.profile.startswith("azure"):
-        xml = _apim_xml()
-        ET.fromstring(xml)
-        write("apim_policies.xml", xml)
-    elif "xml" in formats:
-        artifacts.append(
-            ArtifactRecord(
-                path="apim_policies.xml",
-                sha256=None,
-                status="not_applicable",
-                reason="APIM is not selected",
-            )
-        )
+        if covers("routing") and design.model_aliases:
+            write("litellm.yaml", litellm_yaml(design))
+        for name, (component, value) in _policy_files(design).items():
+            if covers(component):
+                write(f"policies/{name}", yaml.safe_dump(value, sort_keys=True))
+    if "xml" in formats and covers("api"):
+        if design.requirements.profile.startswith("azure"):
+            xml = apim_policy_xml(design)
+            ET.fromstring(xml)
+            write("apim_policies.xml", xml)
+        else:
+            record("apim_policies.xml", "not_applicable", "APIM is not selected for this profile")
     if "mmd" in formats:
-        write("diagrams/architecture_diagram.mmd", mermaid(graph))
-    if "drawio" in formats:
-        source = drawio(graph)
-        ET.fromstring(source)
-        write("diagrams/architecture_diagram.drawio", source)
-    svg_source = svg(graph)
+        for item in selected_views:
+            write(f"diagrams/{item.key}.mmd", item.mermaid)
+    svg_sources = {item.key: to_svg(item.scene) for item in selected_views}
     if "svg" in formats:
-        ET.fromstring(svg_source)
-        write("diagrams/architecture_diagram.svg", svg_source)
-    if "tf" in formats:
+        for key, source in svg_sources.items():
+            ET.fromstring(source)
+            write(f"diagrams/{key}.svg", source)
+    architecture = next((item for item in selected_views if item.key == "architecture"), None)
+    if architecture is not None:
+        if "mmd" in formats:
+            write("diagrams/architecture_diagram.mmd", architecture.mermaid)
+        if "svg" in formats:
+            write("diagrams/architecture_diagram.svg", svg_sources["architecture"])
+        if "drawio" in formats:
+            source = drawio(graph)
+            ET.fromstring(source)
+            write("diagrams/architecture_diagram.drawio", source)
+    if "tf" in formats and covers("infra") and design.deployment:
         if design.requirements.profile == "agnostic":
-            artifacts.append(
-                ArtifactRecord(
-                    path="infrastructure/main.tf",
-                    sha256=None,
-                    status="not_applicable",
-                    reason="agnostic profile has no fake universal Terraform",
-                )
+            record(
+                "infrastructure/primary/main.tf",
+                "not_applicable",
+                "agnostic profile has no fake universal Terraform",
             )
         else:
-            write("infrastructure/main.tf", _terraform(design.requirements.profile))
-            write("infrastructure/variables.tf", _terraform_variables())
+            for relative, content in sorted(compile_infrastructure(design).items()):
+                write(relative, content)
     if "png" in formats:
-        try:
-            png_bytes = _render_png(svg_source, graph)
-            write("diagrams/architecture_diagram.png", png_bytes)
-        except (ImportError, OSError) as exc:
-            artifacts.append(
-                ArtifactRecord(
-                    path="diagrams/architecture_diagram.png",
-                    sha256=None,
-                    status="failed",
-                    reason=f"optional CairoSVG renderer unavailable: {exc}",
-                )
-            )
+        for item in selected_views:
+            relative = f"diagrams/{item.key}.png"
+            try:
+                data = to_png(item.scene)
+            except (ImportError, OSError) as exc:
+                record(relative, "failed", f"optional Pillow renderer unavailable: {exc}")
+                continue
+            write(relative, data)
+            if item.key == "architecture":
+                write("diagrams/architecture_diagram.png", data)
     if "pdf" in formats:
-        try:
-            pdf_path = root / "Complete_AI_System_Design.pdf"
-            _complete_pdf(
-                pdf_path,
-                complete_document(design, graph, diagnostics),
-                root / "diagrams" / "architecture_diagram.png",
-                design.project,
+        scenes = {item.key: item.scene for item in views}
+        pdf_jobs: list[tuple[str, str, str]] = []
+        for name, content in sorted(documents.items()):
+            folder = "requirements" if name == "AI_Enterprise_PRD.md" else "documents"
+            title = content.splitlines()[0].lstrip("# ").strip() if content else name
+            pdf_jobs.append((f"{folder}/{name.removesuffix('.md')}.pdf", content, title))
+        if full:
+            pdf_jobs.insert(
+                0,
+                (
+                    "Complete_AI_System_Design.pdf",
+                    complete_document(design, graph, diagnostics),
+                    "Complete AI System Design",
+                ),
             )
-            data = pdf_path.read_bytes()
+        for relative, content, title in pdf_jobs:
+            try:
+                _pdf(root / relative, content, title, design, scenes)
+            except ImportError as exc:
+                record(relative, "failed", f"optional ReportLab renderer unavailable: {exc}")
+                continue
+            data = (root / relative).read_bytes()
             artifacts.append(
-                ArtifactRecord(
-                    path="Complete_AI_System_Design.pdf",
-                    sha256=sha256_bytes(data),
-                    status="generated",
-                )
-            )
-        except ImportError as exc:
-            artifacts.append(
-                ArtifactRecord(
-                    path="Complete_AI_System_Design.pdf",
-                    sha256=None,
-                    status="failed",
-                    reason=f"optional ReportLab renderer unavailable: {exc}",
-                )
+                ArtifactRecord(path=relative, sha256=sha256_bytes(data), status="generated")
             )
 
     manifest = ExportBundleManifest(
@@ -199,221 +272,206 @@ def export_revision(
     return root, manifest
 
 
-def _gateway_json(design: Any) -> bytes:
+def _pdf(
+    path: Path, markdown: str, title: str, design: EnterpriseDesign, scenes: dict[str, Any]
+) -> None:
+    from archai.compilers.pdf import render_pdf
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    req = design.requirements
+    sources = sorted({source_label(s.source) for s in design.components.values() if s.source})
+    render_pdf(
+        markdown,
+        path,
+        title=title,
+        project=design.project,
+        diagrams=scenes,
+        subtitle=req.business_outcome,
+        cover_rows=[
+            ("Profile", f"{req.profile} · {req.region} · {req.topology}"),
+            ("Completeness", "complete" if project_complete(design) else "partial"),
+            ("Designed by", ", ".join(sources) or "deterministic baseline"),
+            ("Deployment status", "design assets only; not deployed"),
+        ],
+    )
+
+
+def _gateway_json(design: EnterpriseDesign) -> bytes:
+    policy = design.routing_policy
     return json_bytes(
         {
             "control_ownership": {
                 "authentication": "enterprise-api-gateway",
                 "request_limits": "enterprise-api-gateway",
+                "token_limits": "application-model-admission",
                 "budget_reservation": "application-model-admission",
                 "provider_retry": "ai-gateway",
+                "timeout": "ai-gateway",
+                "circuit_breaker": "ai-gateway",
                 "cache_authorization": "application",
                 "usage_settlement": "application-model-admission",
+                "logging": "opentelemetry-pipeline",
             },
+            "api_contracts": [item.model_dump(mode="json") for item in design.api_contracts],
             "aliases": [item.model_dump(mode="json") for item in design.model_aliases],
             "endpoints": [item.model_dump(mode="json") for item in design.endpoints],
-            "attempt_limit": 2,
+            "routing_policy": policy.model_dump(mode="json") if policy else None,
+            "attempt_limit": policy.max_attempts if policy else 2,
             "stream_replay": "forbidden-after-first-byte",
         }
     )
 
 
-def _litellm_yaml(design: Any) -> str:
-    model_list = []
+def _litellm_params(endpoint: Any) -> dict[str, Any]:
+    provider = endpoint.provider.lower()
+    env = endpoint.id.upper().replace("-", "_")
+    deployment = endpoint.deployment_id
+    if "azure" in provider:
+        params: dict[str, Any] = {
+            "model": f"azure/{deployment}",
+            "api_base": f"os.environ/{env}_API_BASE",
+            "api_version": f"os.environ/{env}_API_VERSION",
+            "api_key": f"os.environ/{env}_API_KEY",
+        }
+    elif "bedrock" in provider:
+        params = {"model": f"bedrock/{deployment}", "aws_region_name": f"os.environ/{env}_REGION"}
+    elif "anthropic" in provider:
+        params = {"model": f"anthropic/{deployment}", "api_key": f"os.environ/{env}_API_KEY"}
+    elif "vertex" in provider or "google" in provider:
+        params = {
+            "model": f"vertex_ai/{deployment}",
+            "vertex_project": f"os.environ/{env}_VERTEX_PROJECT",
+            "vertex_location": f"os.environ/{env}_VERTEX_LOCATION",
+        }
+    elif provider == "openai":
+        params = {"model": f"openai/{deployment}", "api_key": f"os.environ/{env}_API_KEY"}
+    else:
+        params = {
+            "model": f"openai/{deployment}",
+            "api_base": f"os.environ/{env}_API_BASE",
+            "api_key": f"os.environ/{env}_API_KEY",
+        }
+    params["rpm"] = endpoint.rpm
+    params["tpm"] = endpoint.tpm
+    return params
+
+
+def litellm_yaml(design: EnterpriseDesign) -> str:
+    endpoints = {item.id: item for item in design.endpoints}
+    model_list: list[dict[str, Any]] = []
+    fallbacks: list[dict[str, list[str]]] = []
     for alias in design.model_aliases:
-        for endpoint_id in alias.endpoint_ids:
-            endpoint = next(item for item in design.endpoints if item.id == endpoint_id)
+        if not alias.endpoint_ids:
+            continue
+        primary = endpoints[alias.endpoint_ids[0]]
+        mode = "embedding" if "embeddings" in alias.required_capabilities else "chat"
+        model_list.append(
+            {
+                "model_name": alias.id,
+                "litellm_params": _litellm_params(primary),
+                "model_info": {"id": primary.id, "mode": mode},
+            }
+        )
+        names = []
+        for index, endpoint_id in enumerate(alias.fallback_endpoint_ids, start=1):
+            name = f"{alias.id}-fallback-{index}"
+            endpoint = endpoints[endpoint_id]
             model_list.append(
                 {
-                    "model_name": alias.id,
-                    "litellm_params": {
-                        "model": endpoint.deployment_id,
-                        "api_key": f"os.environ/{endpoint.id.upper().replace('-', '_')}_API_KEY",
-                    },
+                    "model_name": name,
+                    "litellm_params": _litellm_params(endpoint),
+                    "model_info": {"id": endpoint.id, "mode": mode},
                 }
             )
-    return yaml.safe_dump(
+            names.append(name)
+        if names:
+            fallbacks.append({alias.id: names})
+    attempts = design.routing_policy.max_attempts if design.routing_policy else 2
+    router: dict[str, Any] = {
+        "routing_strategy": "simple-shuffle",
+        "num_retries": max(0, min(2, attempts - 1)),
+        "timeout": 120,
+        "allowed_fails": 3,
+        "cooldown_time": 30,
+    }
+    if fallbacks:
+        router["fallbacks"] = fallbacks
+    header = (
+        "# LiteLLM proxy configuration generated by ArchAI.\n"
+        "# Deployment IDs marked USER_SUPPLIED are account inputs; secrets are environment\n"
+        "# references only. The AI gateway is the single provider-retry owner. Budget\n"
+        "# reservations are enforced by the model-admission service, not by this file.\n"
+    )
+    return header + yaml.safe_dump(
         {
             "model_list": model_list,
-            "router_settings": {"num_retries": 1, "allowed_fails": 2, "cooldown_time": 30},
+            "router_settings": router,
+            "litellm_settings": {"drop_params": False},
+            "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY"},
         },
         sort_keys=False,
     )
 
 
-def _policy_files(design: Any) -> dict[str, Any]:
-    files: dict[str, Any] = {}
-    for name, value in (
-        ("budgets.yaml", design.budget_policy),
-        ("cache_policy.yaml", design.cache_policy),
-        ("queue_policy.yaml", design.queue_policy),
-        ("identity_policy.yaml", design.identity_policy),
-        ("guardrails.yaml", design.guardrails),
+def _policy_files(design: EnterpriseDesign) -> dict[str, tuple[str, Any]]:
+    files: dict[str, tuple[str, Any]] = {}
+    for name, component, value in (
+        ("budgets.yaml", "budget", design.budget_policy),
+        ("cache_policy.yaml", "cache", design.cache_policy),
+        ("queue_policy.yaml", "resilience", design.queue_policy),
+        ("identity_policy.yaml", "auth", design.identity_policy),
+        ("guardrails.yaml", "guard", design.guardrails),
     ):
         if value:
             if isinstance(value, list):
-                files[name] = [item.model_dump(mode="json") for item in value]
+                files[name] = (component, [item.model_dump(mode="json") for item in value])
             else:
-                files[name] = value.model_dump(mode="json")
+                files[name] = (component, value.model_dump(mode="json"))
     return files
 
 
-def _apim_xml() -> str:
-    return """<policies>
-  <inbound>
-    <base />
-    <validate-jwt header-name="Authorization" failed-validation-httpcode="401" require-expiration-time="true" require-scheme="Bearer">
-      <openid-config url="{{entra-openid-config-url}}" />
-      <audiences><audience>{{api-audience}}</audience></audiences>
-    </validate-jwt>
-    <rate-limit-by-key calls="{{rpm-limit}}" renewal-period="60" counter-key="@(context.Principal?.Id ?? &quot;anonymous&quot;)" />
-  </inbound>
-  <backend><base /></backend>
-  <outbound><base /></outbound>
-  <on-error><base /></on-error>
-</policies>
-"""
-
-
-def _integration_contracts(design: Any) -> str:
-    return """# Custom runtime integration contracts
-
-Generated gateway files do not implement these application responsibilities:
-
-- Atomic hierarchical monetary reservations and durable settlement/reconciliation.
-- Trusted-claim-to-tenant/budget mapping and object-level authorization.
-- Tool authorization and human approval bound to exact arguments.
-- Provider eligibility filtering for residency, capability, evaluation, quota, and deadline.
-- Idempotent outbox/job state transitions and uncertain side-effect handling.
-
-These controls are `custom-runtime-required`; the generated assets are reviewed design inputs only.
-"""
-
-
-def _terraform(profile: str) -> str:
-    provider = "azurerm" if profile.startswith("azure") else "aws"
-    return f"""terraform {{
-  required_version = ">= 1.7, < 2.0"
-  required_providers {{
-    {provider} = {{
-      source  = "hashicorp/{provider}"
-      version = "~> 4.0"
-    }}
-  }}
-}}
-
-# Reviewed design scaffold. Add approved account/network/SKU inputs before planning.
-# ArchAI never runs terraform apply.
-"""
-
-
-def _terraform_variables() -> str:
-    return """variable "application_image" {
-  description = "User-owned immutable application image reference"
-  type        = string
-  validation {
-    condition     = length(trimspace(var.application_image)) > 0 && !startswith(var.application_image, "example")
-    error_message = "Supply a real user-owned application image reference."
-  }
-}
-"""
-
-
-def _complete_pdf(path: Path, markdown: str, diagram_path: Path, project: str) -> None:
-    from reportlab.lib.pagesizes import A4  # type: ignore[import-untyped]
-    from reportlab.lib.styles import getSampleStyleSheet  # type: ignore[import-untyped]
-    from reportlab.lib.units import mm  # type: ignore[import-untyped]
-    from reportlab.pdfgen import canvas  # type: ignore[import-untyped]
-    from reportlab.platypus import (  # type: ignore[import-untyped]
-        Image,
-        PageBreak,
-        Paragraph,
-        SimpleDocTemplate,
-        Spacer,
-    )
-
-    styles = getSampleStyleSheet()
-    styles["Title"].fontName = "Helvetica-Bold"
-    styles["Title"].fontSize = 24
-    styles["Title"].leading = 29
-    styles["Heading1"].spaceBefore = 14
-    styles["Heading1"].spaceAfter = 8
-    styles["Heading2"].spaceBefore = 10
-    styles["BodyText"].fontSize = 9.5
-    styles["BodyText"].leading = 13
-    styles["Bullet"].fontSize = 9.5
-    styles["Bullet"].leading = 13
-    document = SimpleDocTemplate(
-        str(path),
-        pagesize=A4,
-        rightMargin=18 * mm,
-        leftMargin=18 * mm,
-        topMargin=20 * mm,
-        bottomMargin=18 * mm,
-        title="Complete AI System Design",
-        author="",
-        subject=f"ArchAI reviewed design for {project}",
-    )
-    story: list[Any] = []
-    inserted_diagram = False
-    for raw_line in markdown.splitlines():
-        line = raw_line.strip()
-        if not line:
-            story.append(Spacer(1, 3 * mm))
-            continue
-        if line.startswith("# "):
-            if story:
-                story.append(PageBreak())
-            story.append(Paragraph(escape(line[2:]), styles["Title"]))
-            continue
-        if line.startswith("## "):
-            story.append(Paragraph(escape(line[3:]), styles["Heading1"]))
-            if not inserted_diagram and diagram_path.exists() and "Outcome" in line:
-                story.append(Spacer(1, 2 * mm))
-                story.append(
-                    Image(str(diagram_path), width=174 * mm, height=39 * mm, kind="proportional")
-                )
-                story.append(Paragraph("Canonical architecture view", styles["Italic"]))
-                inserted_diagram = True
-            continue
-        if line.startswith("### "):
-            story.append(Paragraph(escape(line[4:]), styles["Heading2"]))
-            continue
-        if line.startswith("- "):
-            story.append(Paragraph(escape(line[2:]), styles["Bullet"], bulletText="-"))
-            continue
-        if line.startswith("> "):
-            story.append(Paragraph(f"<i>{escape(line[2:])}</i>", styles["BodyText"]))
-            continue
-        cleaned = escape(line).replace("`", "")
-        cleaned = cleaned.replace("**", "")
-        story.append(Paragraph(cleaned, styles["BodyText"]))
-
-    def footer(pdf: Any, doc: Any) -> None:
-        pdf.saveState()
-        pdf.setFont("Helvetica", 8)
-        pdf.setFillColorRGB(0.35, 0.39, 0.45)
-        pdf.drawString(18 * mm, 10 * mm, f"ArchAI - {project} - design assets only")
-        pdf.drawRightString(A4[0] - 18 * mm, 10 * mm, f"Page {doc.page}")
-        pdf.restoreState()
-
-    document.build(
-        story,
-        onFirstPage=footer,
-        onLaterPages=footer,
-        canvasmaker=partial(canvas.Canvas, invariant=1),
-    )
-
-
-def _render_png(svg_source: str, graph: Any) -> bytes:
-    try:
-        import cairosvg  # type: ignore[import-untyped]
-
-        return cast(bytes, cairosvg.svg2png(bytestring=svg_source.encode()))
-    except (ImportError, OSError) as cairo_error:
-        try:
-            return png(graph)
-        except ImportError as pillow_error:
-            raise OSError(
-                f"CairoSVG and Pillow renderers are unavailable: {cairo_error}; {pillow_error}"
-            ) from pillow_error
+def _integration_contracts(design: EnterpriseDesign) -> str:
+    custom = [c for c in design.guardrails if c.enforcement == "custom-runtime-required"]
+    lines = [
+        "# Custom runtime integration contracts",
+        "",
+        "Generated gateway files do not implement these application responsibilities. Each is a",
+        "`custom-runtime-required` contract that the target application must implement and test.",
+        "",
+        "## Budget reservation service",
+        "",
+        "| Operation | Contract |",
+        "| --- | --- |",
+        "| `POST /internal/budget/reservations` | Atomically reserve a bounded attempt across "
+        "organization, department, and application scopes; returns `reservation_id` or 409 |",
+        "| `POST /internal/budget/reservations/{id}/dispatch` | Durable dispatch record (outbox) |",
+        "| `POST /internal/budget/reservations/{id}/settle` | Idempotent settlement with reported "
+        "usage |",
+        "| `POST /internal/budget/reservations/{id}/unresolved` | Keep liability when usage is "
+        "unknown |",
+        "| `POST /internal/budget/reservations/{id}/release` | Only when dispatch provably never "
+        "happened |",
+        "",
+        "## Other responsibilities",
+        "",
+        "- Trusted-claim-to-tenant/budget mapping and object-level authorization.",
+        "- Tool authorization and human approval bound to exact arguments.",
+        "- Provider eligibility filtering for residency, capability, evaluation, quota, and "
+        "deadline.",
+        "- Idempotent outbox/job state transitions and uncertain side-effect handling.",
+    ]
+    if custom:
+        lines += [
+            "",
+            "## Guardrail controls",
+            "",
+            "| ID | Stage | Control | Owner |",
+            "| --- | --- | --- | --- |",
+        ]
+        lines += [f"| `{c.id}` | {c.stage} | {c.control} | {c.owner} |" for c in custom]
+    lines += [
+        "",
+        "These controls are `custom-runtime-required`; the generated assets are reviewed "
+        "design inputs only.",
+    ]
+    return "\n".join(lines) + "\n"

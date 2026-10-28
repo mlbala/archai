@@ -150,26 +150,13 @@ def test_auto_without_project_explains_next_step():
     assert "archai auto -p my-project" in result.output
 
 
-def test_openai_selected_for_prose_and_critical_inputs_still_required(tmp_path, monkeypatch):
-    from archai.application.extraction import RequirementsExtraction
-    from archai.architect_providers.base import StructuredResult, Usage
-
-    calls = []
-
-    class FakeProvider:
-        def generate(self, prompt, output_type):
-            calls.append(prompt)
-            return StructuredResult(
-                value=RequirementsExtraction.model_validate(
-                    {"facts": [{"field": "users", "value": "agents", "source_quote": "agents"}]}
-                ),
-                usage=Usage(input_tokens=5, output_tokens=3),
-            )
-
+def test_openai_selected_for_prose_and_critical_inputs_still_required(
+    tmp_path, monkeypatch, fake_architect
+):
     def fake_factory(settings, name, model):
         assert name == "openai"
         assert model == "chosen-model"
-        return FakeProvider()
+        return fake_architect
 
     monkeypatch.setattr("archai.application.service.create_provider", fake_factory)
     result = runner.invoke(
@@ -184,14 +171,16 @@ def test_openai_selected_for_prose_and_critical_inputs_still_required(tmp_path, 
             "openai",
             "--architect-model",
             "chosen-model",
+            "--non-interactive",
             "--output-dir",
             str(tmp_path),
         ],
     )
     assert result.exit_code == 2
-    assert len(calls) == 1
+    assert [name for name, _ in fake_architect.prompts] == ["RequirementsAnalysis"]
     assert "REQ-TOOL_SIDE_EFFECTS" in result.output
     assert "REQ-MONTHLY_BUDGET" in result.output
+    assert "unresolved_questions" in result.output
 
 
 def test_setup_stores_secret_without_printing_it(tmp_path, monkeypatch):
