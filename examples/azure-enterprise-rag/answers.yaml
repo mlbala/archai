@@ -1,0 +1,9 @@
+region: westeurope
+data_residency:
+  - westeurope
+  - northeurope
+tenant_isolation: multi
+tool_side_effects: approval
+monthly_budget: 25000
+currency: EUR
+

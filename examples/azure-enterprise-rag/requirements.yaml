@@ -1,0 +1,28 @@
+idea: Build an enterprise support copilot with grounded answers and approved refund actions.
+business_outcome: Reduce support resolution time while preserving tenant and document permissions.
+users:
+  - Support agents
+  - Finance approvers
+archetypes:
+  - enterprise-rag
+  - tool-using-agent
+region: westeurope
+data_residency:
+  - westeurope
+  - northeurope
+tenant_isolation: multi
+allowed_target_providers:
+  - Azure OpenAI
+  - AWS Bedrock
+tool_side_effects: approval
+avg_rps: 2
+peak_rps: 8
+input_tokens: 1800
+output_tokens: 500
+model_calls_per_request: 1.2
+monthly_budget: 25000
+currency: EUR
+availability_target: 99.9
+profile: azure-aca
+topology: provider-failover
+

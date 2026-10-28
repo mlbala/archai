@@ -1,0 +1,13 @@
+budget_limit: 10
+stream_started: false
+attempts:
+  - id: primary-timeout
+    reserve: 4
+    error: timeout
+  - id: secondary-rate-limit
+    reserve: 3
+    error: rate_limit
+  - id: secondary-retry
+    reserve: 3
+    actual: 2.4
+

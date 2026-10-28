@@ -1,0 +1,6 @@
+monthly_budget: 18000
+data_residency:
+  - westeurope
+  - northeurope
+tool_side_effects: approval
+

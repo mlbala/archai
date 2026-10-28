@@ -1,0 +1,34 @@
+schema_version: 1
+catalog_version: "2026-10-28"
+status: design-capability-baseline
+notice: >-
+  Endpoint access, deployment IDs, quotas, prices, regions, licenses, and account entitlements
+  are user/account inputs. This catalog is not a live availability or price feed.
+profiles:
+  azure-aca:
+    hosting: Azure Container Apps
+    broker: Azure Service Bus
+    gateway: Azure API Management
+  azure-aks:
+    hosting: Azure Kubernetes Service
+    broker: Azure Service Bus
+    scaler: KEDA
+    gateway: Azure API Management
+  aws-eks:
+    hosting: Amazon EKS
+    broker: Amazon SQS
+    state: Amazon RDS for PostgreSQL
+  agnostic:
+    terraform: not_applicable
+native_renderers:
+  apim:
+    format: XML policy
+    support: native
+  litellm:
+    format: YAML
+    support: native
+  kong:
+    support: design-only
+  apisix:
+    support: design-only
+

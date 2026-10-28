@@ -1,0 +1,20 @@
+idea: Build a managed-model agent for internal support knowledge and read-only tools.
+business_outcome: Improve internal support response consistency without autonomous side effects.
+users: [Internal support staff]
+archetypes: [enterprise-rag, tool-using-agent]
+region: eu-west-1
+data_residency: [eu-west-1]
+tenant_isolation: single
+allowed_target_providers: [AWS Bedrock]
+tool_side_effects: forbidden
+avg_rps: 1
+peak_rps: 5
+input_tokens: 1200
+output_tokens: 400
+model_calls_per_request: 1
+monthly_budget: 12000
+currency: EUR
+availability_target: 99.5
+profile: aws-eks
+topology: single-cloud
+

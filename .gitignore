@@ -151,6 +151,8 @@ activemq-data/
 
 # Environments
 .env
+.DS_Store
+output/
 .envrc
 .venv
 env/

@@ -1,0 +1,25 @@
+component: guard
+set:
+  guardrails:
+    - id: guard-input
+      stage: input
+      control: size, content, task authorization, and prompt-injection screening
+      owner: application
+      enforcement: custom-runtime-required
+    - id: guard-retrieval
+      stage: retrieval
+      control: tenant, object ACL, source trust, and index-version filter
+      owner: application
+      enforcement: custom-runtime-required
+    - id: guard-tools
+      stage: tool
+      control: schema and authorization with human approval bound to exact refund arguments
+      owner: workflow
+      enforcement: custom-runtime-required
+    - id: guard-output
+      stage: output
+      control: schema, grounding citation, and sensitive-data release validation
+      owner: application
+      enforcement: custom-runtime-required
+unset: []
+
