@@ -32,9 +32,9 @@ archai doctor
 
 Alternatively set `ARCHAI_ARCHITECT_PROVIDER=openai`, `OPENAI_API_KEY`, and optionally
 `ARCHAI_ARCHITECT_MODEL`; or use `gemini` and `GEMINI_API_KEY`. The provider-specific defaults are
-`gpt-6.1-sol` and `gemini-4-argon`; supply a model available to your account that supports structured
-output. Gemini 4 Argon requires a paid Gemini API tier. Both defaults can incur API charges; check your
-provider's current prices and account access. Per-command `--architect-provider` and
+`gpt-6-luna` and `gemini-3.1-pro-preview`; supply a model available to your account that supports
+structured output. Gemini 3.1 Pro is a preview model and requires a paid Gemini API tier. Both defaults
+can incur API charges; check your provider's current prices and account access. Per-command `--architect-provider` and
 `--architect-model` override these settings.
 
 With a configured key, prose requirements (`.md`, `.txt`, `--idea`, or `--stdin`) are sent to the

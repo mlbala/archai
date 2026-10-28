@@ -53,7 +53,7 @@ def test_gemini_four_uses_structured_output_without_sampling_parameters():
 def test_current_default_model_selection():
     from archai.architect_providers.factory import DEFAULT_MODELS
 
-    assert DEFAULT_MODELS == {"gemini": "gemini-4-argon", "openai": "gpt-6.1-sol"}
+    assert DEFAULT_MODELS == {"gemini": "gemini-3.1-pro-preview", "openai": "gpt-6-luna"}
 
 
 def test_openai_refusal_is_reported_without_retry():
@@ -83,7 +83,7 @@ def test_provider_override_does_not_reuse_other_provider_model():
     settings = Settings(
         _env_file=None, architect_provider="gemini", architect_model="gemini-custom"
     )
-    assert selected_model(settings, "openai", None) == "gpt-6.1-sol"
+    assert selected_model(settings, "openai", None) == "gpt-6-luna"
     assert selected_model(settings, "openai", "my-model") == "my-model"
 
 
