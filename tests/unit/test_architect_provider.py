@@ -4,13 +4,14 @@ from unittest.mock import Mock
 import pytest
 from pydantic import BaseModel
 
-from archai.application.extraction import RequirementsExtraction, extract_requirements
-from archai.architect_providers.base import StructuredResult, Usage
+from archai.application.extraction import apply_quoted_suggestions, interview_suggestions
+from archai.architect_providers.base import Usage, inline_json_schema
 from archai.architect_providers.factory import create_provider, selected_model
 from archai.architect_providers.gemini import GeminiArchitectProvider
 from archai.architect_providers.openai import OpenAIArchitectProvider
 from archai.config import Settings
 from archai.errors import ProviderError
+from archai.schemas.proposals import RequirementsAnalysis, scoped_proposal_model
 
 
 class Answer(BaseModel):
@@ -46,14 +47,20 @@ def test_gemini_four_uses_structured_output_without_sampling_parameters():
     kwargs = client.models.generate_content.call_args.kwargs
     assert result.value.value == "hello"
     assert kwargs["model"] == "gemini-4-argon"
-    assert kwargs["config"].response_schema is Answer
+    assert kwargs["config"].response_json_schema["properties"]["value"]["type"] == "string"
+    assert kwargs["config"].response_schema is None
     assert kwargs["config"].temperature is None
 
 
 def test_current_default_model_selection():
     from archai.architect_providers.factory import DEFAULT_MODELS
 
-    assert DEFAULT_MODELS == {"gemini": "gemini-3.1-pro-preview", "openai": "gpt-6-luna"}
+    assert DEFAULT_MODELS == {
+        "openai": "gpt-6-sol",
+        "anthropic": "claude-opus-5-5",
+        "gemini": "gemini-3.1-pro-preview",
+        "deepseek": "deepseek-v4-pro",
+    }
 
 
 def test_openai_refusal_is_reported_without_retry():
@@ -83,33 +90,76 @@ def test_provider_override_does_not_reuse_other_provider_model():
     settings = Settings(
         _env_file=None, architect_provider="gemini", architect_model="gemini-custom"
     )
-    assert selected_model(settings, "openai", None) == "gpt-6-luna"
+    assert selected_model(settings, "openai", None) == "gpt-6-sol"
     assert selected_model(settings, "openai", "my-model") == "my-model"
 
 
-def test_extraction_rejects_unsupported_quotes_and_preserves_answers():
-    provider = Mock()
-    provider.generate.return_value = StructuredResult(
-        value=RequirementsExtraction.model_validate(
-            {
-                "facts": [
-                    {
-                        "field": "business_outcome",
-                        "value": "reduce cost",
-                        "source_quote": "reduce cost",
-                    },
-                    {"field": "users", "value": "finance", "source_quote": "not in source"},
-                    {"field": "archetypes", "value": "RAG", "source_quote": "use RAG"},
-                ]
-            }
-        ),
-        usage=Usage(input_tokens=1, output_tokens=2),
+def _analysis(*suggestions: dict[str, str]) -> RequirementsAnalysis:
+    return RequirementsAnalysis.model_validate(
+        {
+            "summary": "s",
+            "suggestions": list(suggestions),
+            "clarifying_questions": [],
+            "detected_risks": [],
+        }
     )
-    merged, usage = extract_requirements(
-        provider, "We want to reduce cost and use RAG", {"business_outcome": "manual"}
+
+
+def test_extraction_rejects_unsupported_quotes_and_preserves_answers():
+    analysis = _analysis(
+        {
+            "field": "business_outcome",
+            "value": "reduce cost",
+            "rationale": "",
+            "source_quote": "reduce cost",
+        },
+        {"field": "users", "value": "finance", "rationale": "", "source_quote": "not in source"},
+        {"field": "archetypes", "value": "RAG", "rationale": "", "source_quote": "use RAG"},
+        {"field": "tool_side_effects", "value": "allowed", "rationale": "", "source_quote": ""},
+    )
+    merged = apply_quoted_suggestions(
+        analysis, {"business_outcome": "manual"}, "We want to reduce cost and use RAG"
     )
     assert merged["business_outcome"] == "manual"
     assert "users" not in merged
     assert merged["archetypes"] == ["RAG"]
     assert "tool_side_effects" not in merged
-    assert usage.input_tokens == 1
+
+
+def test_assumptions_only_for_noncritical_fields_when_allowed():
+    analysis = _analysis(
+        {"field": "latency_p95_ms", "value": "6000", "rationale": "chat", "source_quote": ""},
+        {"field": "monthly_budget", "value": "5000", "rationale": "guess", "source_quote": ""},
+    )
+    blocked = apply_quoted_suggestions(analysis, {}, "text")
+    assert "latency_p95_ms" not in blocked
+    allowed = apply_quoted_suggestions(analysis, {}, "text", allow_assumptions=True)
+    assert allowed["latency_p95_ms"] == 6000
+    assert "monthly_budget" not in allowed
+    assert allowed["assumptions"][0]["id"] == "assumption-latency-p95-ms"
+
+
+def test_interview_suggestions_are_typed_and_skip_answered_fields():
+    analysis = _analysis(
+        {
+            "field": "archetypes",
+            "value": "1, tool-using-agent",
+            "rationale": "r",
+            "source_quote": "grounded answers",
+        },
+        {"field": "region", "value": "westeurope", "rationale": "EU users", "source_quote": ""},
+        {"field": "avg_rps", "value": "not a number", "rationale": "", "source_quote": ""},
+    )
+    suggestions = interview_suggestions(analysis, {"region": "eastus"})
+    assert suggestions["archetypes"].value == ["enterprise-rag", "tool-using-agent"]
+    assert "grounded answers" in suggestions["archetypes"].rationale
+    assert "region" not in suggestions
+    assert "avg_rps" not in suggestions
+
+
+def test_proposal_schemas_are_strict_and_inlinable():
+    model = scoped_proposal_model("cloud", ["system", "data", "infra"])
+    schema = inline_json_schema(model)
+    assert "$ref" not in str(schema)
+    assert set(schema["required"]) == {"services", "data_stores", "infra", "decisions"}
+    assert schema["additionalProperties"] is False

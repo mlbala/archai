@@ -1,11 +1,46 @@
 # Architecture
 
-ArchAI is a modular local CLI. Component commands share one registry, deterministic domain engines,
-canonical `EnterpriseDesign`, linked `ArchitectureGraph`, immutable revisions, and separate export
-bundles. Five typed specialist roles define the workflow boundary; deterministic compilation owns
-arithmetic, validation, layout, and configuration syntax.
+ArchAI is a modular local CLI. Component commands and `arch auto` share one registry, one
+canonical `EnterpriseDesign`, a linked `ArchitectureGraph`, immutable revisions, and separate
+export bundles.
 
-The generated target system is distinct from the designer. Target assets describe managed model APIs,
-gateway responsibilities, durable budget reservation, identity, queues, data, guardrails, telemetry,
-and reviewed infrastructure. They are never applied by ArchAI.
+## Run flow
 
+```text
+arch auto / arch <component>
+  -> inputs (files, --idea, --answers, stdin) merged into a requirements draft
+  -> Enterprise Requirements Architect: intake analysis (suggestions + clarifying questions)
+  -> guided interview on a terminal (persisted after every answer; resumable)
+  -> RequirementsSpec validated
+  -> deterministic baseline for every scoped component (apply_scope)
+  -> Supervisor
+       PRD (role 1)
+       Cloud, Data & Resilience Architect (role 3): system, data, workflow, rag, infra, resilience
+       API & Routing Architect (role 2) ‖ Identity, Security & Observability Architect (role 4)
+       ProposalMerger: normalize IDs, drop dangling references, clamp values
+       Design Verifier (role 5): findings; blocking ones trigger <= 2 targeted revision passes
+  -> deterministic capacity/cost engine, policy invariants, manual decisions, locks
+  -> validation -> immutable revision -> export bundle (Markdown, PDF, diagrams, IaC, configs)
+```
+
+Each role call uses a scoped structured-output schema built from only the components in scope, so
+`arch infra` asks the cloud role for infrastructure fields alone. Calls share a run budget
+(`ARCHAI_MAX_GENERATION_CALLS`, `ARCHAI_MAX_GENERATION_TOKENS`). Roles can be bound to different
+providers and models (`ARCHAI_ROLE_MODELS`); if a provider fails with a quota, availability, or
+credential error and another provider is configured, the role retries there and the failing
+provider is skipped for the rest of the run. Transient failures without an alternative fall back to
+the deterministic baseline with a warning; the component's "Designed by" label records which.
+
+## Modules
+
+- `interview/` — typed question bank and the resumable interview session (UI-independent).
+- `application/supervisor.py` — five roles, prompts, call budget, failover, revision passes.
+- `application/merge.py` — proposal validation and Python-owned invariants.
+- `application/designer.py` — deterministic baseline and graph projection.
+- `compilers/` — documents (`report.py`), views and scenes (`views.py`, `scene.py`), PDF
+  (`pdf.py`), Terraform and Kubernetes (`terraform.py`), exports (`export.py`).
+- `ui.py` — Rich interview prompts, live status board, summaries.
+
+The generated target system is distinct from the designer. Target assets describe managed model
+APIs, gateway responsibilities, durable budget reservation, identity, queues, data, guardrails,
+telemetry, and reviewed infrastructure. They are never applied by ArchAI.

@@ -38,8 +38,21 @@ def estimate_capacity(
     )
 
 
-def estimate_cost(requirements: RequirementsSpec, endpoint: TargetEndpoint) -> CostEstimate:
-    monthly_calls = requirements.avg_rps * SECONDS_PER_MONTH * requirements.model_calls_per_request
+def estimate_cost(
+    requirements: RequirementsSpec,
+    endpoint: TargetEndpoint,
+    *,
+    scenario: str = "baseline",
+    rps: Decimal | None = None,
+    attempts: Decimal = Decimal(1),
+) -> CostEstimate:
+    """Monthly managed-model token cost if the given request rate were sustained all month.
+
+    ``attempts`` multiplies calls to model retries or fallback attempts. Unknown prices produce
+    a known subtotal plus warnings rather than a false zero total.
+    """
+    rate = rps if rps is not None else requirements.avg_rps
+    monthly_calls = rate * SECONDS_PER_MONTH * requirements.model_calls_per_request * attempts
     inputs = monthly_calls * requirements.input_tokens
     outputs = monthly_calls * requirements.output_tokens
     items: list[CostLineItem] = []
@@ -62,12 +75,12 @@ def estimate_cost(requirements: RequirementsSpec, endpoint: TargetEndpoint) -> C
                 unit_price=price,
                 currency=requirements.currency,
                 subtotal=subtotal,
-                source="project endpoint input; not a live quotation",
+                source=f"{endpoint.id} project input; not a live quotation",
             )
         )
     warnings.append("Cloud compute, data, telemetry, and network prices require account rate cards")
     return CostEstimate(
-        scenario="baseline",
+        scenario=scenario,
         currency=requirements.currency,
         known_subtotal=known,
         complete=False,
