@@ -4,7 +4,7 @@ from archai.architect_providers.openai import OpenAIArchitectProvider
 from archai.config import Settings
 from archai.errors import ProviderError
 
-DEFAULT_MODELS = {"gemini": "gemini-2.5-pro", "openai": "gpt-4o-mini"}
+DEFAULT_MODELS = {"gemini": "gemini-4-argon", "openai": "gpt-6.1-sol"}
 
 
 def selected_model(settings: Settings, provider: str, explicit_model: str | None) -> str:

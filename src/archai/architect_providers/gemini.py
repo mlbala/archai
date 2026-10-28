@@ -29,7 +29,6 @@ class GeminiArchitectProvider:
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
                         response_schema=output_type,
-                        temperature=0.1,
                     ),
                 )
                 if not response.text:

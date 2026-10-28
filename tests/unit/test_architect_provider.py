@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from archai.application.extraction import RequirementsExtraction, extract_requirements
 from archai.architect_providers.base import StructuredResult, Usage
 from archai.architect_providers.factory import create_provider, selected_model
+from archai.architect_providers.gemini import GeminiArchitectProvider
 from archai.architect_providers.openai import OpenAIArchitectProvider
 from archai.config import Settings
 from archai.errors import ProviderError
@@ -31,6 +32,28 @@ def test_openai_responses_parse_and_usage():
     assert result.usage == Usage(input_tokens=12, output_tokens=4)
     assert client.responses.parse.call_args.kwargs["model"] == "test-model"
     assert client.responses.parse.call_args.kwargs["text_format"] is Answer
+
+
+def test_gemini_four_uses_structured_output_without_sampling_parameters():
+    client = Mock()
+    client.models.generate_content.return_value = SimpleNamespace(
+        text='{"value":"hello"}',
+        usage_metadata=SimpleNamespace(prompt_token_count=8, candidates_token_count=2),
+    )
+    provider = GeminiArchitectProvider("test-key", "gemini-4-argon")
+    provider.client = client
+    result = provider.generate("extract", Answer)
+    kwargs = client.models.generate_content.call_args.kwargs
+    assert result.value.value == "hello"
+    assert kwargs["model"] == "gemini-4-argon"
+    assert kwargs["config"].response_schema is Answer
+    assert kwargs["config"].temperature is None
+
+
+def test_current_default_model_selection():
+    from archai.architect_providers.factory import DEFAULT_MODELS
+
+    assert DEFAULT_MODELS == {"gemini": "gemini-4-argon", "openai": "gpt-6.1-sol"}
 
 
 def test_openai_refusal_is_reported_without_retry():
@@ -60,7 +83,7 @@ def test_provider_override_does_not_reuse_other_provider_model():
     settings = Settings(
         _env_file=None, architect_provider="gemini", architect_model="gemini-custom"
     )
-    assert selected_model(settings, "openai", None) == "gpt-4o-mini"
+    assert selected_model(settings, "openai", None) == "gpt-6.1-sol"
     assert selected_model(settings, "openai", "my-model") == "my-model"
 
 
