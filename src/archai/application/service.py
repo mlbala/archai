@@ -9,10 +9,18 @@ from uuid import uuid4
 import yaml
 
 from archai.application.designer import apply_scope, build_graph
+from archai.application.extraction import extract_requirements
 from archai.application.registry import AUTO_COMPONENTS, COMPONENTS
+from archai.architect_providers.factory import create_provider, selected_model
 from archai.compilers.report import complete_document, component_document, requirements_document
+from archai.config import Settings
 from archai.domain.validation import validate_design
-from archai.errors import IncompleteRequirementsError, StateConflictError, ValidationError
+from archai.errors import (
+    IncompleteRequirementsError,
+    ProviderError,
+    StateConflictError,
+    ValidationError,
+)
 from archai.ingestion import merge_inputs, parse_requirements, sha256_bytes
 from archai.persistence.store import ProjectStore, json_bytes
 from archai.schemas.models import (
@@ -88,6 +96,8 @@ def run_generation(
     allow_assumptions: bool,
     override: Path | None = None,
     requested_base_revision: int | None = None,
+    architect_provider: str | None = None,
+    architect_model: str | None = None,
 ) -> tuple[ProjectStore, int]:
     del allow_assumptions  # noncritical defaults are explicit in canonical templates
     store = ProjectStore(output_dir, project)
@@ -144,6 +154,42 @@ def run_generation(
                     {key: value for key, value in merged.items() if value not in (None, [], "")}
                 )
                 merged = baseline_data
+            prose = [text for path, text in raw_sources if path.suffix.lower() in {".md", ".txt"}]
+            if idea:
+                prose.append(idea)
+            if stdin_text:
+                prose.append(stdin_text)
+            settings = Settings()
+            chosen = (architect_provider or settings.architect_provider).lower()
+            key_available = bool(
+                settings.openai_api_key if chosen == "openai" else settings.gemini_api_key
+            )
+            if prose and (architect_provider is not None or key_available):
+                print(
+                    f"Sending prose requirements to {chosen} for structured extraction; "
+                    "provider usage may be billed.",
+                    file=sys.stderr,
+                )
+                try:
+                    provider = create_provider(settings, architect_provider, architect_model)
+                    merged, usage = extract_requirements(provider, "\n\n".join(prose), merged)
+                except ProviderError as exc:
+                    run_state.status = "failed"
+                    run_state.diagnostics.append(
+                        ValidationDiagnostic(
+                            code="ARCHITECT_PROVIDER_ERROR",
+                            severity="error",
+                            message=str(exc),
+                        )
+                    )
+                    store.save_run(run_state, merged)
+                    raise
+                run_state.architect_provider = chosen
+                run_state.architect_model = selected_model(settings, chosen, architect_model)
+                run_state.architect_usage = {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                }
             input_snapshot = merged
             try:
                 requirements = parse_requirements(merged)

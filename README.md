@@ -22,18 +22,31 @@ On macOS, `/usr/bin/arch` already exists. An activated virtual environment norma
 `arch` first on `PATH`; use `archai` if shell resolution still selects the system command. Both entrypoints
 invoke `archai.cli:app`.
 
-Configure Gemini only for workflows that require architect-model synthesis:
+Run the setup wizard to choose OpenAI or Gemini, select a model and optionally save an API key
+in the local, gitignored `.env` file (permissions are restricted to the current user):
 
 ```sh
-export ARCHAI_GEMINI_API_KEY='...'
-export ARCHAI_ARCHITECT_MODEL='your-approved-model-id'
+archai setup
+archai doctor
 ```
 
-ArchAI sends source content to an external architect provider only in an actual model-backed generation
-workflow. Deterministic validation, simulation, diffing, and export of saved canonical state do not call
-a model. Never commit credentials; `.env.example` contains names only.
+Alternatively set `ARCHAI_ARCHITECT_PROVIDER=openai`, `OPENAI_API_KEY`, and optionally
+`ARCHAI_ARCHITECT_MODEL`; or use `gemini` and `GEMINI_API_KEY`. The provider-specific defaults are
+`gpt-4o-mini` and `gemini-2.5-pro`; supply a model available to your account that supports structured
+output. Per-command `--architect-provider` and `--architect-model` override these settings.
+
+With a configured key, prose requirements (`.md`, `.txt`, `--idea`, or `--stdin`) are sent to the
+chosen provider for extraction of explicitly stated business outcomes, users, and archetypes. API calls
+may incur charges. Critical permissions, data location, budgets, traffic, and other required fields must
+still be supplied as structured answers; model output does not authorize them. The current architecture
+design itself uses deterministic templates rather than model-generated designs. Fully structured YAML/JSON
+input, dry runs, validation, simulation, diffs, and exports do not make model calls. Never commit credentials.
 
 ## Complete design
+
+Running `archai auto` alone prints an example and exits with code 2 because it needs a project name.
+Given a project and complete structured requirements, it creates a revision and export bundle. Missing
+critical inputs produce question IDs and a resumable run; it does not prompt or invent the answers.
 
 ```sh
 arch auto -p eu-support \

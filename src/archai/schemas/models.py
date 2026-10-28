@@ -403,3 +403,6 @@ class RunState(StrictModel):
     status: Literal["running", "blocked", "failed", "accepted", "cancelled"]
     completed_steps: list[str] = Field(default_factory=list)
     diagnostics: list[ValidationDiagnostic] = Field(default_factory=list)
+    architect_provider: str | None = None
+    architect_model: str | None = None
+    architect_usage: dict[str, int | None] = Field(default_factory=dict)

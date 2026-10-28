@@ -153,6 +153,7 @@ activemq-data/
 .env
 .DS_Store
 output/
+archai-starter/
 .envrc
 .venv
 env/

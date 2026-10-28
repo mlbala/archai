@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Annotated, Any
 
 import typer
 import yaml
+from dotenv import set_key
 from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
 from rich.table import Table
@@ -107,8 +109,9 @@ def component_entry(
         Path | None, typer.Option("--answers", help="Structured JSON/YAML answers.")
     ] = None,
     architect_provider: Annotated[
-        str, typer.Option("--architect-provider", help="Designer provider adapter.")
-    ] = "gemini",
+        str | None,
+        typer.Option("--architect-provider", help="Architect provider: openai or gemini."),
+    ] = None,
     architect_model: Annotated[
         str | None, typer.Option("--architect-model", help="Designer model identifier.")
     ] = None,
@@ -169,14 +172,14 @@ def component_entry(
         str, typer.Option("--template", help="Trusted packaged template name.")
     ] = "default",
 ) -> None:
-    del mode, non_interactive, architect_model, sections
+    del mode, non_interactive, sections
     component = str(ctx.info_name)
     if component == "design":
         component = "system"
     try:
         store = ProjectStore(output_dir, project)
-        if architect_provider != "gemini":
-            raise ValueError("only the Gemini architect-provider adapter is implemented")
+        if architect_provider and architect_provider.lower() not in {"gemini", "openai"}:
+            raise ValueError("architect provider must be openai or gemini")
         if audience not in {"technical", "executive"}:
             raise ValueError("--audience must be technical or executive")
         if template != "default":
@@ -240,6 +243,8 @@ def component_entry(
             allow_assumptions=allow_assumptions,
             override=override,
             requested_base_revision=base_revision,
+            architect_provider=architect_provider,
+            architect_model=architect_model,
         )
         export_scope = scope.split(",") if scope else [component]
         bundle, manifest = export_revision(
@@ -260,12 +265,12 @@ app.command(name="design", help="Alias of `arch system`; not a complete design."
 
 @app.command("auto")
 def auto(
-    project: Annotated[str, typer.Option("--project", "-p")],
+    project: Annotated[str | None, typer.Option("--project", "-p")] = None,
     files: Annotated[list[Path] | None, typer.Option("--file", "-f")] = None,
     idea: Annotated[str | None, typer.Option("--idea", "-i")] = None,
     stdin: Annotated[bool, typer.Option("--stdin")] = False,
     answers: Annotated[Path | None, typer.Option("--answers")] = None,
-    architect_provider: Annotated[str, typer.Option("--architect-provider")] = "gemini",
+    architect_provider: Annotated[str | None, typer.Option("--architect-provider")] = None,
     architect_model: Annotated[str | None, typer.Option("--architect-model")] = None,
     profile: Annotated[str | None, typer.Option("--profile")] = None,
     region: Annotated[str | None, typer.Option("--region")] = None,
@@ -280,9 +285,16 @@ def auto(
     output_dir: Annotated[Path, typer.Option("--output-dir")] = Path("output"),
     formats: Annotated[str, typer.Option("--formats")] = "all",
 ) -> None:
-    del non_interactive, architect_model
-    if architect_provider != "gemini":
-        _fail(ValueError("only the Gemini architect-provider adapter is implemented"))
+    del non_interactive
+    if not project:
+        err_console.print(
+            "Provide a project and requirements, for example:\n"
+            "  archai auto -p my-project -f requirements.yaml --formats core\n"
+            "Run `archai setup` to configure OpenAI or Gemini; use `archai auto --help` for options."
+        )
+        raise typer.Exit(2)
+    if architect_provider and architect_provider.lower() not in {"openai", "gemini"}:
+        _fail(ValueError("architect provider must be openai or gemini"))
     selected_files = list(files or [])
     if policy:
         selected_files.append(policy)
@@ -303,6 +315,8 @@ def auto(
         output_dir=output_dir,
         formats=formats,
         base_revision=base_revision,
+        architect_provider=architect_provider,
+        architect_model=architect_model,
     )
 
 
@@ -324,6 +338,8 @@ def _execute_generation(
     output_dir: Path = Path("output"),
     formats: str = "core",
     base_revision: int | None = None,
+    architect_provider: str | None = None,
+    architect_model: str | None = None,
 ) -> None:
     try:
         store = ProjectStore(output_dir, project)
@@ -345,6 +361,8 @@ def _execute_generation(
             archetypes=archetype or [],
             allow_assumptions=allow_assumptions,
             requested_base_revision=base_revision,
+            architect_provider=architect_provider,
+            architect_model=architect_model,
         )
         bundle, manifest = export_revision(store, revision, normalize_formats(formats), scope)
         _print_result(store, revision, bundle, manifest)
@@ -623,6 +641,9 @@ def doctor(check_provider: Annotated[bool, typer.Option("--check-provider")] = F
     checks = {
         "python": sys.version.split()[0],
         "terraform": shutil.which("terraform") or "not installed",
+        "architect_provider": settings.architect_provider,
+        "architect_model": settings.architect_model or "provider default",
+        "openai_configuration": "configured" if settings.openai_api_key else "missing",
         "gemini_configuration": "configured"
         if settings.gemini_api_key
         else "missing (only generation requiring Gemini is blocked)",
@@ -633,6 +654,63 @@ def doctor(check_provider: Annotated[bool, typer.Option("--check-provider")] = F
             "not run: doctor never makes an unbounded or hidden billed call"
         )
     console.print_json(data=checks)
+
+
+@app.command("setup")
+def setup() -> None:
+    """Configure an architect provider and API key in a local, gitignored .env file."""
+    if not _is_interactive():
+        err_console.print(
+            "Interactive setup requires a terminal. Set ARCHAI_ARCHITECT_PROVIDER and "
+            "OPENAI_API_KEY or GEMINI_API_KEY in your environment instead."
+        )
+        raise typer.Exit(2)
+    from archai.architect_providers.factory import DEFAULT_MODELS
+
+    current = Settings()
+    provider = typer.prompt(
+        "Architect provider (openai or gemini)", default=current.architect_provider
+    ).lower()
+    if provider not in DEFAULT_MODELS:
+        _fail(ValueError("architect provider must be openai or gemini"))
+    default_model = (
+        current.architect_model
+        if provider == current.architect_provider and current.architect_model
+        else DEFAULT_MODELS[provider]
+    )
+    model = typer.prompt("Model ID", default=default_model).strip()
+    if not model:
+        _fail(ValueError("model ID cannot be empty"))
+    console.print(
+        "ArchAI sends prose requirements to the chosen provider for extraction. "
+        "API usage may be billed. Structured YAML/JSON can be used without a model call."
+    )
+    key = typer.prompt(
+        "API key (leave blank to use an existing environment key)",
+        default="",
+        hide_input=True,
+        show_default=False,
+    )
+    env_path = Path(".env")
+    if env_path.is_symlink() or (env_path.exists() and not env_path.is_file()):
+        _fail(ValueError("refusing to write .env through a symlink or non-file"))
+    if not env_path.exists():
+        descriptor = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+    os.chmod(env_path, 0o600)
+    set_key(str(env_path), "ARCHAI_ARCHITECT_PROVIDER", provider)
+    set_key(str(env_path), "ARCHAI_ARCHITECT_MODEL", model)
+    if key:
+        set_key(
+            str(env_path),
+            "ARCHAI_OPENAI_API_KEY" if provider == "openai" else "ARCHAI_GEMINI_API_KEY",
+            key,
+        )
+    console.print(f"Saved {provider} setup to .env. Run `archai doctor` to check configuration.")
+
+
+def _is_interactive() -> bool:
+    return sys.stdin.isatty()
 
 
 @catalog_app.command("show")

@@ -142,3 +142,69 @@ def test_document_rerender_does_not_create_revision(tmp_path, requirements_file)
     )
     assert rendered.exit_code == 0, rendered.output
     assert not (tmp_path / "docs/revisions/0002").exists()
+
+
+def test_auto_without_project_explains_next_step():
+    result = runner.invoke(app, ["auto"])
+    assert result.exit_code == 2
+    assert "archai auto -p my-project" in result.output
+
+
+def test_openai_selected_for_prose_and_critical_inputs_still_required(tmp_path, monkeypatch):
+    from archai.application.extraction import RequirementsExtraction
+    from archai.architect_providers.base import StructuredResult, Usage
+
+    calls = []
+
+    class FakeProvider:
+        def generate(self, prompt, output_type):
+            calls.append(prompt)
+            return StructuredResult(
+                value=RequirementsExtraction.model_validate(
+                    {"facts": [{"field": "users", "value": "agents", "source_quote": "agents"}]}
+                ),
+                usage=Usage(input_tokens=5, output_tokens=3),
+            )
+
+    def fake_factory(settings, name, model):
+        assert name == "openai"
+        assert model == "chosen-model"
+        return FakeProvider()
+
+    monkeypatch.setattr("archai.application.service.create_provider", fake_factory)
+    result = runner.invoke(
+        app,
+        [
+            "auto",
+            "-p",
+            "prose",
+            "-i",
+            "A copilot for agents",
+            "--architect-provider",
+            "openai",
+            "--architect-model",
+            "chosen-model",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 2
+    assert len(calls) == 1
+    assert "REQ-TOOL_SIDE_EFFECTS" in result.output
+    assert "REQ-MONTHLY_BUDGET" in result.output
+
+
+def test_setup_stores_secret_without_printing_it(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("archai.cli._is_interactive", lambda: True)
+    monkeypatch.delenv("ARCHAI_ARCHITECT_PROVIDER", raising=False)
+    monkeypatch.delenv("ARCHAI_ARCHITECT_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    result = runner.invoke(app, ["setup"], input="openai\ncustom-model\nprivate-test-key\n")
+    assert result.exit_code == 0, result.output
+    assert "private-test-key" not in result.output
+    config = tmp_path / ".env"
+    assert "ARCHAI_ARCHITECT_PROVIDER='openai'" in config.read_text()
+    assert "ARCHAI_ARCHITECT_MODEL='custom-model'" in config.read_text()
+    assert "ARCHAI_OPENAI_API_KEY='private-test-key'" in config.read_text()
+    assert config.stat().st_mode & 0o777 == 0o600
