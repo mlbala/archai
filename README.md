@@ -1,12 +1,13 @@
 # ArchAI
 
-ArchAI is a terminal AI solutions architect. It interviews you about an AI application, then a
-team of five specialist AI architects designs the complete system — microservices, APIs and API
-management, model routing and fallback, token budgets, caching, workflows and human approval,
-RAG, data stores, cloud infrastructure, resilience, identity and OAuth 2.0, guardrails, threat
-model, observability, evaluation, and capacity/cost. It saves every design as an immutable
-revision and exports Markdown and PDF documents, architecture diagrams, Terraform, Kubernetes
-manifests, LiteLLM and APIM configuration, and policy files.
+ArchAI is a terminal AI solutions architect. It interviews you about an AI application, or reads
+the same requirements from files, then a team of five specialist AI architects designs the
+complete system — microservices, APIs and API management, model routing and fallback, token
+budgets, caching, workflows and human approval, RAG, data stores, cloud infrastructure,
+scale-up, resilience, identity and OAuth 2.0, guardrails, threat model, observability,
+evaluation, and capacity/cost. It saves every design as an immutable revision and exports one
+end-to-end Markdown and PDF design, standalone component documents, architecture diagrams,
+Terraform, Kubernetes manifests, LiteLLM and APIM configuration, and policy files.
 
 The primary command is `arch`; `archai` is an equivalent alias (macOS already has `/usr/bin/arch`).
 ArchAI generates reviewed design assets. It never deploys or provisions anything.
@@ -102,8 +103,10 @@ On a terminal this:
      guardrails, STRIDE + OWASP LLM threat model, observability, evaluation
    - Design Verifier → cross-component review; blocking findings trigger at most two targeted
      revision passes
-   - deterministic engines → capacity and cost, policy invariants, validation;
-5. saves an immutable revision and an export bundle, and prints a summary with the PDF path.
+   - deterministic engines → capacity and cost, the scale-up contract, policy invariants,
+     validation;
+5. saves an immutable revision and an export bundle, and prints the path to
+   `Complete_AI_System_Design.pdf`.
 
 Model output is treated as an untrusted proposal: Python validates it, normalizes IDs, drops
 dangling references, and enforces the rules that matter (data residency, hard-budget rejection,
@@ -127,7 +130,9 @@ terminal) or supply `--answers answers.yaml`.
 output/<project>/
   revisions/0001/                      immutable design: state/*.json, documents/*.md, manifest
   exports/0001/<bundle>/
-    Complete_AI_System_Design.md|pdf   consolidated design with diagrams and traceability
+    Complete_AI_System_Design.md|pdf   one end-to-end design: architecture diagrams,
+                                       microservices, each component, infrastructure,
+                                       scale-up, traceability
     requirements/AI_Enterprise_PRD.md|pdf
     documents/<Component>_Design.md|pdf   one standalone document per component
     diagrams/<view>.{mmd,svg,png}      architecture, request flow, OAuth flows, deployment,
@@ -143,8 +148,24 @@ output/<project>/
     enterprise_design.json, architecture_graph.json, validation_report.json, manifest.json
 ```
 
+`Complete_AI_System_Design.pdf` is the document to open after `arch auto`. It is built once from
+the requirements you supply on the terminal or with `-f` / `--answers`. The architecture,
+request, and deployment diagrams are in the overview. Later chapters are the microservice
+catalog, each component design, the infrastructure bill of materials, and the scale-up
+architecture. The scale-up table lists every service with its mode, replica range, trigger, and
+hard bound. Those minimums and maximums are the same numbers written into the generated
+Terraform and Kubernetes autoscalers. The ceiling is peak worker estimate × 3, clamped to 3–30.
+It is a load-test starting point. Provider quotas still bound model throughput.
+
+Request-path services scale on concurrency (Container Apps HTTP rules, or a CPU
+HorizontalPodAutoscaler on AKS and EKS). Queue workers scale on queue depth and can scale to
+zero (Container Apps Service Bus rules, or KEDA). The enterprise gateway and telemetry pipeline
+stay on managed capacity. `arch diagram -p PROJECT --view scale` redraws that view;
+`--view scaleup` is the same view.
+
 `--formats core` writes md, json, yaml, mmd, drawio, svg, tf, and xml. `--formats all` (default)
-adds PNG and PDF.
+adds PNG and PDF. Wide tables in the PDF, such as the threat model and API contracts, are laid
+out as one record per row.
 
 ## Component commands
 
@@ -170,7 +191,7 @@ architect role plus the verifier.
 arch status [PROJECT]          # component status, completeness, latest export, resumable runs
 arch list
 arch doc -p PROJECT [--scope guard,infra] [--formats md,pdf]   # re-render documents, no model calls
-arch diagram -p PROJECT --view deployment
+arch diagram -p PROJECT --view deployment   # or architecture, scale, request, oauth, ...
 arch export PROJECT [--revision N] [--formats all]
 arch inspect PROJECT [--component NAME]
 arch edit -p PROJECT --component NAME --file OVERRIDES.yaml [--yes]
@@ -190,6 +211,8 @@ failure, 5 requested export failed, 6 lock or state conflict, 130 interrupted or
 ## Limits and honesty
 
 - Cost output is a scenario from your inputs, not a quotation; missing prices stay unknown.
+- Scale-up replica counts are the same starting points as the generated autoscalers. They are
+  not a measured production limit, and ArchAI does not apply them.
 - Terraform and manifests are generated, not validated or applied. Run `terraform validate/plan`
   in your own pipeline with approved credentials.
 - Catalogs (capabilities, OWASP LLM Top 10 2025) are packaged snapshots; verify before relying on
