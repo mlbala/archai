@@ -9,6 +9,13 @@ import re
 from dataclasses import dataclass
 
 from archai.application.designer import LANES
+from archai.compilers.hops import (
+    SequenceSpec,
+    async_sequence,
+    fallback_sequence,
+    identity_sequences,
+    request_sequence,
+)
 from archai.compilers.scene import (
     LayoutEdge,
     LayoutNode,
@@ -19,7 +26,7 @@ from archai.compilers.scene import (
     sequence_scene,
 )
 from archai.domain.scale import replica_ceiling, scale_targets
-from archai.schemas.models import ArchitectureGraph, EnterpriseDesign, Service
+from archai.schemas.models import ArchitectureGraph, EnterpriseDesign
 
 STYLE_BY_KIND = {
     "client": "client",
@@ -73,10 +80,6 @@ def mmsg(text: str) -> str:
     return " ".join(str(text).split()).replace(";", ",").replace("#", "").replace("\n", " ")
 
 
-def _service(design: EnterpriseDesign, *kinds: str) -> Service | None:
-    return next((s for s in design.services if s.kind in kinds), None)
-
-
 # ---------------------------------------------------------------- architecture
 
 
@@ -124,6 +127,46 @@ def architecture_view(design: EnterpriseDesign, graph: ArchitectureGraph) -> Vie
     )
 
 
+def context_view(design: EnterpriseDesign) -> View:
+    """Users, identity, the application, and managed models — one box each."""
+    req = design.requirements
+    users = ", ".join(req.users[:3]) or "Users"
+    idp = (
+        design.identity_policy.idp
+        if design.identity_policy
+        else (req.identity_provider or "Identity provider")
+    )
+    cloud = design.deployment.hosting_cloud if design.deployment else req.profile
+    region = design.deployment.region if design.deployment else req.region
+    providers = ", ".join(req.allowed_target_providers[:3]) or "Managed models"
+    app = design.project.replace("-", " ")
+    left = [(users, "client")]
+    channels = ", ".join(req.client_channels[:2])
+    if channels:
+        left.append((channels, "client"))
+    groups = [(cloud, [(app, region)], "application")]
+    right: list[tuple[str, str, str]] = []
+    if design.identity_policy or req.identity_provider:
+        right.append((idp, "sign-in tokens", "identity"))
+    right.append((providers, "managed APIs", "model"))
+    scene = group_scene("System context", groups, f"{cloud} · {region}", left, right)
+    lines = [
+        "flowchart LR",
+        f'    users["{mlabel(users)}"] --> app["{mlabel(app)}"]',
+    ]
+    if design.identity_policy or req.identity_provider:
+        lines.append(f'    idp["{mlabel(idp)}"] -.->|"{mlabel("tokens")}"| app')
+    lines.append(f'    app --> models["{mlabel(providers)}"]')
+    return View(
+        "context",
+        "System context",
+        "Who uses the application, where it is hosted, and which identity and model "
+        "providers sit outside the trust boundary.",
+        "\n".join(lines) + "\n",
+        scene,
+    )
+
+
 def _sublabel(design: EnterpriseDesign, node_id: str) -> str | None:
     for service in design.services:
         if service.id == node_id:
@@ -141,53 +184,13 @@ def _sublabel(design: EnterpriseDesign, node_id: str) -> str | None:
 
 
 def request_view(design: EnterpriseDesign) -> View:
-    gateway = _service(design, "gateway")
-    app = _service(design, "application", "orchestration")
-    retrieval = _service(design, "retrieval")
-    admission = _service(design, "policy")
-    ai = _service(design, "ai-gateway")
-    idp = design.identity_policy.idp if design.identity_policy else "Identity provider"
-    provider = next(
-        (e.provider for e in design.endpoints if "embeddings" not in e.modalities), "Managed model"
-    )
-    participants = [("client", "Client", "client"), ("idp", idp, "identity")]
-    participants.append(("gw", gateway.name if gateway else "API gateway", "gateway"))
-    participants.append(("app", app.name if app else "Application", "application"))
-    if retrieval:
-        participants.append(("ret", retrieval.name, "application"))
-    participants.append(("adm", admission.name if admission else "Model admission", "policy"))
-    participants.append(("ai", ai.name if ai else "AI gateway", "ai"))
-    participants.append(("llm", f"{provider} endpoint", "model"))
-    messages: list[tuple[str, str, str, bool]] = [
-        ("client", "idp", "Sign in (authorization code + PKCE)", False),
-        ("idp", "client", "Access token (aud, tid, roles, scp)", True),
-        ("client", "gw", "POST /v1/chat with bearer token", False),
-        ("gw", "gw", "Validate JWT, rate limit, correlation ID", False),
-        ("gw", "app", "Authorized request + trusted claims", False),
-    ]
-    if retrieval:
-        messages += [
-            ("app", "ret", "Retrieve with tenant/ACL filter", False),
-            ("ret", "app", "Permitted passages + citations", True),
-        ]
-    messages += [
-        ("app", "adm", "Admit call: alias, token bound, principal", False),
-        ("adm", "adm", "Filter eligible routes, reserve budget", False),
-        ("adm", "ai", "Dispatch with reservation + attempt IDs", False),
-        ("ai", "llm", "Managed API call (bounded retry owner)", False),
-        ("llm", "ai", "Streamed tokens + usage", True),
-        ("ai", "app", "Stream + usage", True),
-        ("app", "app", "Validate output, guardrails", False),
-        ("app", "adm", "Settle actual usage", False),
-        ("app", "client", "SSE stream with citations", True),
-    ]
-    return _sequence(
-        "request",
-        "Interactive request flow",
-        "Standard path: token validation → orchestration → admission → AI gateway → managed model.",
-        participants,
-        messages,
-    )
+    spec = request_sequence(design)
+    return _from_spec(spec)
+
+
+def _from_spec(spec: SequenceSpec) -> View:
+    messages = [(item.source, item.target, item.action, item.dashed) for item in spec.steps]
+    return _sequence(spec.key, spec.title, spec.description, spec.participants, messages)
 
 
 def _sequence(
@@ -216,89 +219,7 @@ def _sequence(
 
 
 def oauth_views(design: EnterpriseDesign) -> list[View]:
-    policy = design.identity_policy
-    if policy is None:
-        return []
-    idp = policy.idp
-    views: list[View] = []
-    gateway = _service(design, "gateway")
-    app = _service(design, "application", "orchestration")
-    grants = {flow.grant_type for flow in policy.oauth_flows}
-    if "authorization_code_pkce" in grants:
-        views.append(
-            _sequence(
-                "oauth-user",
-                "User sign-in: OAuth 2.0 authorization code + PKCE",
-                "Public clients obtain short-lived access tokens; the gateway validates them.",
-                [
-                    ("user", "User", "client"),
-                    ("client", "Client app", "client"),
-                    ("idp", idp, "identity"),
-                    ("gw", gateway.name if gateway else "API gateway", "gateway"),
-                    ("app", app.name if app else "Application", "application"),
-                ],
-                [
-                    ("user", "client", "Open application", False),
-                    ("client", "client", "Create code_verifier + code_challenge", False),
-                    ("client", "idp", "/authorize (client_id, scope, code_challenge)", False),
-                    ("idp", "user", "Authenticate + MFA + consent", False),
-                    ("idp", "client", "Authorization code (redirect)", True),
-                    ("client", "idp", "/token (code + code_verifier)", False),
-                    ("idp", "client", "Access + refresh token", True),
-                    ("client", "gw", "API call with bearer access token", False),
-                    ("gw", "gw", "Validate iss, aud, exp, signature, tid, scp", False),
-                    ("gw", "app", "Forward with validated claims", False),
-                    ("app", "app", "Map tid/groups to tenant, department, ACL", False),
-                ],
-            )
-        )
-    if "client_credentials" in grants:
-        worker = _service(design, "worker", "ingestion")
-        admission = _service(design, "policy")
-        views.append(
-            _sequence(
-                "oauth-service",
-                "Service-to-service: workload identity + client credentials",
-                "Services exchange a federated workload token for a short-lived access token.",
-                [
-                    ("svc", worker.name if worker else "Internal service", "worker"),
-                    ("wi", "Workload identity", "identity"),
-                    ("idp", idp, "identity"),
-                    ("api", admission.name if admission else "Internal API", "policy"),
-                ],
-                [
-                    ("svc", "wi", "Request federated token (pod/app identity)", False),
-                    ("wi", "svc", "Signed workload assertion", True),
-                    ("svc", "idp", "client_credentials with client_assertion", False),
-                    ("idp", "svc", "Access token (aud = internal API)", True),
-                    ("svc", "api", "Call with bearer token", False),
-                    ("api", "api", "Validate audience, roles, and caller identity", False),
-                ],
-            )
-        )
-    if "on_behalf_of" in grants:
-        tools = _service(design, "tool-executor")
-        views.append(
-            _sequence(
-                "oauth-obo",
-                "Delegated tool access: on-behalf-of",
-                "Tool calls act with the user's delegated permissions only.",
-                [
-                    ("app", app.name if app else "Application", "application"),
-                    ("tools", tools.name if tools else "Tool service", "application"),
-                    ("idp", idp, "identity"),
-                    ("biz", "Business API", "data"),
-                ],
-                [
-                    ("app", "tools", "Tool request with user token", False),
-                    ("tools", "idp", "OBO exchange for downstream scope", False),
-                    ("idp", "tools", "Delegated token (short-lived)", True),
-                    ("tools", "biz", "Call with delegated token", False),
-                    ("biz", "tools", "Result (user-authorized data only)", True),
-                ],
-            )
-        )
-    return views
+    return [_from_spec(spec) for spec in identity_sequences(design)]
 
 
 # ---------------------------------------------------------------- deployment and data
@@ -555,69 +476,13 @@ def guardrail_view(design: EnterpriseDesign) -> View | None:
 
 
 def fallback_view(design: EnterpriseDesign) -> View | None:
-    aliases = [alias for alias in design.model_aliases if alias.fallback_endpoint_ids]
-    if not aliases:
-        return None
-    alias = aliases[0]
-    endpoints = {endpoint.id: endpoint for endpoint in design.endpoints}
-    primary = endpoints[alias.endpoint_ids[0]]
-    fallback = endpoints[alias.fallback_endpoint_ids[0]]
-    return _sequence(
-        "fallback",
-        f"Provider fallback for {alias.id}",
-        "Fallback happens only before streaming starts, inside the deadline and budget.",
-        [
-            ("adm", "Model admission", "policy"),
-            ("ai", "AI gateway", "ai"),
-            ("p1", f"{primary.provider} (primary)", "model"),
-            ("p2", f"{fallback.provider} (fallback)", "model"),
-        ],
-        [
-            ("adm", "ai", "Dispatch attempt 1 (reservation A)", False),
-            ("ai", "p1", "Call primary endpoint", False),
-            ("p1", "ai", "Timeout / 429 / 5xx before first byte", True),
-            ("ai", "ai", "Circuit check + eligibility re-check", False),
-            ("ai", "adm", "Request reservation B for attempt 2", False),
-            ("adm", "ai", "Reservation B granted", True),
-            ("ai", "p2", "Call approved fallback endpoint", False),
-            ("p2", "ai", "Streamed response + usage", True),
-            ("ai", "adm", "Settle B; A stays unresolved until reconciled", False),
-        ],
-    )
+    spec = fallback_sequence(design)
+    return _from_spec(spec) if spec else None
 
 
 def async_view(design: EnterpriseDesign) -> View | None:
-    if design.queue_policy is None:
-        return None
-    worker = _service(design, "worker", "ingestion")
-    app = _service(design, "application", "orchestration")
-    return _sequence(
-        "async",
-        "Asynchronous job processing",
-        "Outbox publishing, at-least-once delivery, idempotent handlers, and DLQ.",
-        [
-            ("client", "Client", "client"),
-            ("app", app.name if app else "Application", "application"),
-            ("db", "State store (outbox)", "data"),
-            ("q", design.queue_policy.broker, "queue"),
-            ("w", worker.name if worker else "Worker", "worker"),
-        ],
-        [
-            ("client", "app", "POST /v1/jobs (idempotency key)", False),
-            ("app", "db", "Insert job + outbox row in one transaction", False),
-            ("app", "client", "202 Accepted + status URL", True),
-            ("db", "q", "Outbox relay publishes reference message", False),
-            ("q", "w", "Deliver (lock / visibility timeout)", False),
-            ("w", "w", "Dedupe, process within quota", False),
-            ("w", "db", "Idempotent status transition", False),
-            (
-                "w",
-                "q",
-                f"Complete, or dead-letter after {design.queue_policy.max_attempts} tries",
-                True,
-            ),
-        ],
-    )
+    spec = async_sequence(design)
+    return _from_spec(spec) if spec else None
 
 
 def recovery_view(design: EnterpriseDesign) -> View | None:
@@ -698,6 +563,7 @@ def scale_view(design: EnterpriseDesign) -> View | None:
 
 def all_views(design: EnterpriseDesign, graph: ArchitectureGraph) -> list[View]:
     views: list[View | None] = [
+        context_view(design),
         architecture_view(design, graph),
         request_view(design),
         *oauth_views(design),
@@ -730,6 +596,8 @@ COMPONENT_VIEWS: dict[str, tuple[str, ...]] = {
     "security": ("architecture", "guardrails"),
     "observe": ("architecture",),
     "diagram": ("",),
+    "hld": ("context", "architecture", "request", "deployment"),
+    "lld": ("",),
 }
 
 

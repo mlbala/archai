@@ -49,9 +49,15 @@ def test_auto_interviews_for_missing_answers_then_designs_and_exports(tmp_path, 
     assert design["requirements"]["monthly_budget"] == "20000"
     assert design["requirements"]["identity_provider"] == "Entra ID"
     bundle = next((project / "exports/0001").iterdir())
-    assert (bundle / "Complete_AI_System_Design.pdf").read_bytes().startswith(b"%PDF")
-    assert (bundle / "documents/Identity_Design.pdf").exists()
-    assert (bundle / "diagrams/oauth-user.png").read_bytes().startswith(b"\x89PNG")
+    assert (
+        (bundle / "documents/04-complete/Complete_AI_System_Design.pdf")
+        .read_bytes()
+        .startswith(b"%PDF")
+    )
+    assert (bundle / "documents/components/Identity_Design.pdf").exists()
+    assert (bundle / "documents/01-hld/High_Level_Design.pdf").exists()
+    assert (bundle / "documents/02-lld/Low_Level_Design.pdf").exists()
+    assert (bundle / "diagrams/png/oauth-user.png").read_bytes().startswith(b"\x89PNG")
     status = runner.invoke(app, ["status", "guided", "--output-dir", str(tmp_path / "out")])
     assert status.exit_code == 0, status.output
     assert "Completeness: complete" in status.output

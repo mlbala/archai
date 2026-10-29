@@ -7,8 +7,11 @@ from typing import Any
 
 import yaml
 
-from archai.application.registry import AUTO_COMPONENTS, COMPONENTS
-from archai.compilers.diagram import drawio
+from archai.application.registry import AUTO_COMPONENTS, COMPONENTS, DOCUMENT_PACKAGES
+from archai.compilers.diagram import drawio, drawio_document, drawio_scene
+from archai.compilers.hld import high_level_design_document, high_level_views
+from archai.compilers.hops import control_ownership
+from archai.compilers.lld import low_level_design_document, low_level_views
 from archai.compilers.master import master_design_document
 from archai.compilers.report import (
     complete_document,
@@ -19,17 +22,29 @@ from archai.compilers.report import (
     requirements_document,
     source_label,
 )
-from archai.compilers.scene import to_png, to_svg
+from archai.compilers.scene import Scene, to_png, to_svg
 from archai.compilers.terraform import apim_policy_xml, compile_infrastructure
 from archai.compilers.views import View, all_views, views_for
 from archai.ingestion import sha256_bytes
 from archai.persistence.store import ProjectStore, json_bytes, new_bundle_id
-from archai.schemas.models import ArtifactRecord, EnterpriseDesign, ExportBundleManifest
+from archai.schemas.models import (
+    ArchitectureGraph,
+    ArtifactRecord,
+    EnterpriseDesign,
+    ExportBundleManifest,
+)
 
 CORE_FORMATS = {"md", "json", "yaml", "mmd", "drawio", "svg", "tf", "xml"}
 ALL_FORMATS = CORE_FORMATS | {"png", "pdf"}
+REVIEW_DIRS = {
+    "hld": "documents/01-hld",
+    "lld": "documents/02-lld",
+    "master": "documents/03-master",
+    "complete": "documents/04-complete",
+}
 DIAGRAM_VIEWS = (
     "system",
+    "context",
     "deployment",
     "request",
     "ingestion",
@@ -72,7 +87,7 @@ def select_views(views: list[View], scope: list[str], view: str | None) -> list[
             for item in views
             if item.key == key or (key.endswith("-") and item.key.startswith(key))
         ]
-    if "doc" in scope or "diagram" in scope or set(AUTO_COMPONENTS) <= set(scope):
+    if "doc" in scope or "diagram" in scope or "lld" in scope or set(AUTO_COMPONENTS) <= set(scope):
         return views
     selected: list[View] = []
     for component in scope:
@@ -94,6 +109,9 @@ def export_revision(
     revision_manifest = store.load_manifest(revision)
     selected_scope = scope or revision_manifest.selected_scope
     full = "doc" in selected_scope
+    package_only = (not full) and set(selected_scope) <= set(DOCUMENT_PACKAGES)
+    write_hld = full or "hld" in selected_scope
+    write_lld = full or "lld" in selected_scope
     diagnostics = revision_manifest.diagnostics
     bundle_id = new_bundle_id()
     root = store.root / "exports" / f"{revision:04d}" / bundle_id
@@ -115,13 +133,20 @@ def export_revision(
     def covers(*components: str) -> bool:
         return full or any(name in selected_scope for name in components)
 
+    def write_png(relative: str, scene: Scene) -> None:
+        try:
+            write(relative, to_png(scene))
+        except (ImportError, OSError) as exc:
+            record(relative, "failed", f"optional Pillow renderer unavailable: {exc}")
+
     views = all_views(design, graph)
     selected_views = select_views(views, selected_scope, view)
+    skip_component_docs = {"doc", "requirements", *DOCUMENT_PACKAGES}
     documents: dict[str, str] = {}
     if covers("requirements"):
         documents["AI_Enterprise_PRD.md"] = requirements_document(design)
     for component in selected_scope:
-        if component in {"doc", "requirements"} or component not in COMPONENTS:
+        if component in skip_component_docs or component not in COMPONENTS:
             continue
         if component not in design.components and component != "diagram":
             continue
@@ -132,18 +157,23 @@ def export_revision(
         )
     if full:
         for component in COMPONENTS:
-            if component in {"doc", "requirements", "diagram"} or component in selected_scope:
+            if component in skip_component_docs | {"diagram"} or component in selected_scope:
                 continue
             if component in design.components:
                 documents[document_name(component)] = component_document(
                     component, design, graph, diagnostics, views=views
                 )
 
+    hld_markdown = high_level_design_document(design, graph, diagnostics) if write_hld else None
+    lld_markdown = low_level_design_document(design, graph, diagnostics) if write_lld else None
+    master_markdown = master_design_document(design, diagnostics) if full else None
+    complete_markdown = complete_document(design, graph, diagnostics) if full else None
+
     if "json" in formats:
-        write("enterprise_design.json", json_bytes(design))
-        write("architecture_graph.json", json_bytes(graph))
+        write("state/enterprise_design.json", json_bytes(design))
+        write("state/architecture_graph.json", json_bytes(graph))
         write(
-            "validation_report.json",
+            "state/validation_report.json",
             json_bytes(
                 {
                     "scope": selected_scope,
@@ -155,10 +185,10 @@ def export_revision(
             ),
         )
         if covers("api", "routing") and (design.model_aliases or design.api_contracts):
-            write("api_gateway_and_routing_config.json", _gateway_json(design))
+            write("config/gateway/api_gateway_and_routing_config.json", _gateway_json(design))
         if covers("cost") and (design.costs or design.capacity):
             write(
-                "capacity_and_cost.json",
+                "state/capacity_and_cost.json",
                 json_bytes(
                     {
                         "capacity": design.capacity.model_dump(mode="json")
@@ -171,7 +201,7 @@ def export_revision(
             )
         if covers("infra") and design.deployment:
             write(
-                "cloud_bom.json",
+                "state/cloud_bom.json",
                 json_bytes(
                     {
                         "profile": design.deployment.model_dump(mode="json"),
@@ -181,43 +211,52 @@ def export_revision(
             )
     if "md" in formats:
         for name, content in sorted(documents.items()):
-            target = "requirements" if name == "AI_Enterprise_PRD.md" else "documents"
-            write(f"{target}/{name}", content)
-        if full:
-            write("Complete_AI_System_Design.md", complete_document(design, graph, diagnostics))
+            write(f"{_markdown_folder(name)}/{name}", content)
+        if hld_markdown is not None:
+            write(f"{REVIEW_DIRS['hld']}/High_Level_Design.md", hld_markdown)
+        if lld_markdown is not None:
+            write(f"{REVIEW_DIRS['lld']}/Low_Level_Design.md", lld_markdown)
+        if master_markdown is not None:
+            write(f"{REVIEW_DIRS['master']}/Master_Design.md", master_markdown)
+        if complete_markdown is not None:
+            write(f"{REVIEW_DIRS['complete']}/Complete_AI_System_Design.md", complete_markdown)
         if covers("api", "budget", "guard", "auth", "routing"):
-            write("integration_contracts.md", _integration_contracts(design))
+            write("config/integration_contracts.md", _integration_contracts(design))
     if "yaml" in formats:
         if covers("routing") and design.model_aliases:
-            write("litellm.yaml", litellm_yaml(design))
+            write("config/gateway/litellm.yaml", litellm_yaml(design))
         for name, (component, value) in _policy_files(design).items():
             if covers(component):
-                write(f"policies/{name}", yaml.safe_dump(value, sort_keys=True))
+                write(f"config/policies/{name}", yaml.safe_dump(value, sort_keys=True))
     if "xml" in formats and covers("api"):
         if design.requirements.profile.startswith("azure"):
             xml = apim_policy_xml(design)
             ET.fromstring(xml)
-            write("apim_policies.xml", xml)
+            write("config/gateway/apim_policies.xml", xml)
         else:
-            record("apim_policies.xml", "not_applicable", "APIM is not selected for this profile")
+            record(
+                "config/gateway/apim_policies.xml",
+                "not_applicable",
+                "APIM is not selected for this profile",
+            )
+    shared_diagrams = selected_views if not package_only else []
+    svg_sources = {item.key: to_svg(item.scene) for item in shared_diagrams}
     if "mmd" in formats:
-        for item in selected_views:
-            write(f"diagrams/{item.key}.mmd", item.mermaid)
-    svg_sources = {item.key: to_svg(item.scene) for item in selected_views}
+        for item in shared_diagrams:
+            write(f"diagrams/mermaid/{item.key}.mmd", item.mermaid)
     if "svg" in formats:
         for key, source in svg_sources.items():
             ET.fromstring(source)
-            write(f"diagrams/{key}.svg", source)
-    architecture = next((item for item in selected_views if item.key == "architecture"), None)
-    if architecture is not None:
-        if "mmd" in formats:
-            write("diagrams/architecture_diagram.mmd", architecture.mermaid)
-        if "svg" in formats:
-            write("diagrams/architecture_diagram.svg", svg_sources["architecture"])
-        if "drawio" in formats:
-            source = drawio(graph)
+            write(f"diagrams/svg/{key}.svg", source)
+    if "drawio" in formats:
+        for item in shared_diagrams:
+            source = (
+                drawio(graph)
+                if item.key == "architecture"
+                else drawio_scene(item.scene, item.key, item.title)
+            )
             ET.fromstring(source)
-            write("diagrams/architecture_diagram.drawio", source)
+            write(f"diagrams/drawio/{item.key}.drawio", source)
     if "tf" in formats and covers("infra") and design.deployment:
         if design.requirements.profile == "agnostic":
             record(
@@ -229,39 +268,55 @@ def export_revision(
             for relative, content in sorted(compile_infrastructure(design).items()):
                 write(relative, content)
     if "png" in formats:
-        for item in selected_views:
-            relative = f"diagrams/{item.key}.png"
-            try:
-                data = to_png(item.scene)
-            except (ImportError, OSError) as exc:
-                record(relative, "failed", f"optional Pillow renderer unavailable: {exc}")
-                continue
-            write(relative, data)
-            if item.key == "architecture":
-                write("diagrams/architecture_diagram.png", data)
+        for item in shared_diagrams:
+            write_png(f"diagrams/png/{item.key}.png", item.scene)
+    if write_hld:
+        _write_package_diagrams(
+            write,
+            write_png,
+            formats,
+            REVIEW_DIRS["hld"],
+            high_level_views(design, graph),
+            graph,
+            package_only,
+        )
+    if write_lld:
+        _write_package_diagrams(
+            write,
+            write_png,
+            formats,
+            REVIEW_DIRS["lld"],
+            low_level_views(design, graph),
+            graph,
+            package_only,
+        )
     if "pdf" in formats:
         scenes = {item.key: item.scene for item in views}
         pdf_jobs: list[tuple[str, str, str]] = []
         for name, content in sorted(documents.items()):
-            folder = "requirements" if name == "AI_Enterprise_PRD.md" else "documents"
             title = content.splitlines()[0].lstrip("# ").strip() if content else name
-            pdf_jobs.append((f"{folder}/{name.removesuffix('.md')}.pdf", content, title))
-        if full:
-            pdf_jobs.insert(
-                0,
-                (
-                    "Complete_AI_System_Design.pdf",
-                    complete_document(design, graph, diagnostics),
-                    "Complete AI System Design",
-                ),
+            pdf_jobs.append(
+                (f"{_markdown_folder(name)}/{name.removesuffix('.md')}.pdf", content, title)
             )
-            pdf_jobs.insert(
-                1,
+        if hld_markdown is not None:
+            pdf_jobs.append(
+                (f"{REVIEW_DIRS['hld']}/High_Level_Design.pdf", hld_markdown, "High-Level Design")
+            )
+        if lld_markdown is not None:
+            pdf_jobs.append(
+                (f"{REVIEW_DIRS['lld']}/Low_Level_Design.pdf", lld_markdown, "Low-Level Design")
+            )
+        if master_markdown is not None:
+            pdf_jobs.append(
+                (f"{REVIEW_DIRS['master']}/Master_Design.pdf", master_markdown, "Master Design")
+            )
+        if complete_markdown is not None:
+            pdf_jobs.append(
                 (
-                    "master_design/Master_Design.pdf",
-                    master_design_document(design, diagnostics),
-                    "Master Design",
-                ),
+                    f"{REVIEW_DIRS['complete']}/Complete_AI_System_Design.pdf",
+                    complete_markdown,
+                    "Complete AI System Design",
+                )
             )
         for relative, content, title in pdf_jobs:
             try:
@@ -274,6 +329,7 @@ def export_revision(
                 ArtifactRecord(path=relative, sha256=sha256_bytes(data), status="generated")
             )
 
+    write("README.md", _bundle_readme(design, selected_scope, artifacts, formats))
     manifest = ExportBundleManifest(
         project=design.project,
         revision=revision,
@@ -286,6 +342,105 @@ def export_revision(
     write("manifest.json", json_bytes(manifest))
     store.write_export_metadata(bundle_id)
     return root, manifest
+
+
+def _markdown_folder(name: str) -> str:
+    if name == "AI_Enterprise_PRD.md":
+        return "documents/requirements"
+    return "documents/components"
+
+
+def _drawio_pages(
+    views: list[View], graph: ArchitectureGraph
+) -> list[tuple[str, str, ArchitectureGraph | Scene]]:
+    pages: list[tuple[str, str, ArchitectureGraph | Scene]] = []
+    for item in views:
+        if item.key == "architecture":
+            pages.append((item.key, item.title, graph))
+        else:
+            pages.append((item.key, item.title, item.scene))
+    return pages
+
+
+def _write_package_diagrams(
+    write: Any,
+    write_png: Any,
+    formats: set[str],
+    folder: str,
+    views: list[View],
+    graph: ArchitectureGraph,
+    package_only: bool,
+) -> None:
+    if not views:
+        return
+    if "drawio" in formats:
+        source = drawio_document(_drawio_pages(views, graph))
+        ET.fromstring(source)
+        write(f"{folder}/diagrams/system.drawio", source)
+    if package_only:
+        if "mmd" in formats:
+            for item in views:
+                write(f"{folder}/diagrams/{item.key}.mmd", item.mermaid)
+        if "svg" in formats:
+            for item in views:
+                source = to_svg(item.scene)
+                ET.fromstring(source)
+                write(f"{folder}/diagrams/{item.key}.svg", source)
+        if "png" in formats:
+            for item in views:
+                write_png(f"{folder}/diagrams/{item.key}.png", item.scene)
+
+
+def _bundle_readme(
+    design: EnterpriseDesign,
+    scope: list[str],
+    artifacts: list[ArtifactRecord],
+    formats: set[str],
+) -> str:
+    del formats
+    generated = {item.path for item in artifacts if item.status == "generated"}
+
+    def listed(*paths: str) -> list[str]:
+        return [f"- `{path}`" for path in paths if path in generated]
+
+    lines = [
+        f"# {design.project} export",
+        "",
+        "Design assets only; nothing in this bundle is deployed. Files are grouped by use.",
+        "",
+        "## Open these first",
+        "",
+    ]
+    review = listed(
+        f"{REVIEW_DIRS['hld']}/High_Level_Design.pdf",
+        f"{REVIEW_DIRS['hld']}/High_Level_Design.md",
+        f"{REVIEW_DIRS['lld']}/Low_Level_Design.pdf",
+        f"{REVIEW_DIRS['lld']}/Low_Level_Design.md",
+        f"{REVIEW_DIRS['master']}/Master_Design.pdf",
+        f"{REVIEW_DIRS['master']}/Master_Design.md",
+        f"{REVIEW_DIRS['complete']}/Complete_AI_System_Design.pdf",
+        f"{REVIEW_DIRS['complete']}/Complete_AI_System_Design.md",
+    )
+    lines += review or ["- No review documents in this scoped export."]
+    lines += [
+        "",
+        "## Folders",
+        "",
+        "- `documents/01-hld/` — what the system is, tools, and the request path",
+        "- `documents/02-lld/` — one section per hop: owner, interface, payload, failure",
+        "- `documents/03-master/` — feature catalog, build order, and sprint slices",
+        "- `documents/04-complete/` — archive of every component; not the starting point",
+        "- `documents/requirements/` — product requirements",
+        "- `documents/components/` — one document per designed component",
+        "- `diagrams/` — mermaid, svg, png, and draw.io files grouped by format",
+        "- `config/` — policies, gateway files, and custom-runtime contracts",
+        "- `infrastructure/` and `workloads/` — generated IaC; ArchAI never applies it",
+        "- `state/` — canonical JSON for this revision",
+        "",
+        f"Export scope: {', '.join(scope)}.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _pdf(
@@ -316,18 +471,7 @@ def _gateway_json(design: EnterpriseDesign) -> bytes:
     policy = design.routing_policy
     return json_bytes(
         {
-            "control_ownership": {
-                "authentication": "enterprise-api-gateway",
-                "request_limits": "enterprise-api-gateway",
-                "token_limits": "application-model-admission",
-                "budget_reservation": "application-model-admission",
-                "provider_retry": "ai-gateway",
-                "timeout": "ai-gateway",
-                "circuit_breaker": "ai-gateway",
-                "cache_authorization": "application",
-                "usage_settlement": "application-model-admission",
-                "logging": "opentelemetry-pipeline",
-            },
+            "control_ownership": control_ownership(design),
             "api_contracts": [item.model_dump(mode="json") for item in design.api_contracts],
             "aliases": [item.model_dump(mode="json") for item in design.model_aliases],
             "endpoints": [item.model_dump(mode="json") for item in design.endpoints],

@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 from decimal import ROUND_HALF_UP, Decimal
 
-from archai.application.registry import COMPONENTS
+from archai.application.registry import COMPILED_COMPONENTS, COMPONENTS
 from archai.domain.cost import estimate_capacity, estimate_cost
 from archai.domain.geography import endpoint_region, geography
 from archai.schemas.models import (
@@ -219,6 +219,8 @@ def apply_scope(
     design.requirements = requirements
     locked_components = {lock.component for lock in locks if lock.field_path is None}
     for component in scope:
+        if component not in COMPONENTS:
+            continue
         if component in locked_components and baseline is not None:
             continue
         reason = not_applicable_reason(component, requirements)
@@ -236,6 +238,8 @@ def apply_scope(
             name=component, status=ComponentStatus.valid, source=BASELINE_SOURCE
         )
     for component in scope:
+        if component not in COMPONENTS:
+            continue
         for downstream in COMPONENTS[component].invalidates:
             if downstream in scope:
                 continue
@@ -301,7 +305,7 @@ def replace_component_decisions(design: EnterpriseDesign, component: str) -> Non
 
 def baseline_component(design: EnterpriseDesign, name: str) -> None:
     req = design.requirements
-    if name in COMPONENTS and name not in {"cost", "diagram", "doc", "requirements"}:
+    if name in COMPONENTS and name not in {"cost", "requirements", *COMPILED_COMPONENTS}:
         replace_component_decisions(design, name)
     builder = _BUILDERS.get(name)
     if builder is not None:

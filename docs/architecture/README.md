@@ -21,7 +21,7 @@ arch auto / arch <component>
        Design Verifier (role 5): findings; blocking ones trigger <= 2 targeted revision passes
   -> deterministic capacity/cost engine, policy invariants, manual decisions, locks
   -> validation -> immutable revision -> export bundle (Markdown, PDF, diagrams, IaC, configs,
-     and master_design/Master_Design.pdf on a complete export)
+     and documents/01-hld, 02-lld, 03-master, 04-complete on a complete export)
 ```
 
 Each role call uses a scoped structured-output schema built from only the components in scope, so
@@ -38,8 +38,10 @@ the deterministic baseline with a warning; the component's "Designed by" label r
 - `application/supervisor.py` — five roles, prompts, call budget, failover, revision passes.
 - `application/merge.py` — proposal validation and Python-owned invariants.
 - `application/designer.py` — deterministic baseline and graph projection.
-- `compilers/` — documents (`report.py`), views and scenes (`views.py`, `scene.py`), PDF
-  (`pdf.py`), Terraform and Kubernetes (`terraform.py`), exports (`export.py`).
+- `compilers/` — documents (`report.py`, `master.py`, `hld.py`, `lld.py`), hop compiler
+  (`hops.py`), views and scenes (`views.py`, `scene.py`), PDF (`pdf.py`), Terraform and
+  Kubernetes (`terraform.py`), exports (`export.py`). High-level and low-level packages are
+  compiled documents, not design components.
 - `domain/scale.py` — the scale-up contract. The complete design document, the scale diagram,
   and the generated autoscaler minimums and maximums all use this one calculation.
 - `ui.py` — Rich interview prompts, live status board, summaries.

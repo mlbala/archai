@@ -85,10 +85,11 @@ def master_design_document(
         "",
         DISCLAIMER,
         "",
-        "This document is the delivery view of the same revision as "
-        "`Complete_AI_System_Design`. Features, the development plan, and the sprint "
-        "slices are compiled from that design. A sprint is a build slice, not a calendar "
-        "commitment. Dates and team size stay with the people running the project.",
+        "This document is the delivery view of this revision: features, build order, and "
+        "sprint slices. The high-level design is the architecture picture. The low-level "
+        "design walks each hop. `Complete_AI_System_Design` is the component archive. A "
+        "sprint is a build slice, not a calendar commitment. Dates and team size stay with "
+        "the people running the project.",
         "",
         "## 1. Feature catalog",
         "",

@@ -3,7 +3,19 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 
 from archai.application.designer import LANES
-from archai.compilers.scene import LayoutEdge, LayoutNode, Scene, layered_scene, to_png, to_svg
+from archai.compilers.scene import (
+    PALETTE,
+    STROKES,
+    Box,
+    LayoutEdge,
+    LayoutNode,
+    Line,
+    Scene,
+    Text,
+    layered_scene,
+    to_png,
+    to_svg,
+)
 from archai.schemas.models import ArchitectureGraph
 
 NODE_WIDTH = 190
@@ -90,8 +102,25 @@ def png(graph: ArchitectureGraph) -> bytes:
 
 
 def drawio(graph: ArchitectureGraph) -> str:
+    return drawio_document([("architecture", "Architecture", graph)])
+
+
+def drawio_scene(scene: Scene, page_id: str | None = None, name: str | None = None) -> str:
+    return drawio_document([(page_id or "scene", name or scene.title, scene)])
+
+
+def drawio_document(pages: list[tuple[str, str, ArchitectureGraph | Scene]]) -> str:
     root = ET.Element("mxfile", {"host": "app.diagrams.net", "agent": "ArchAI"})
-    diagram = ET.SubElement(root, "diagram", {"id": "architecture", "name": "Architecture"})
+    for page_id, name, source in pages:
+        if isinstance(source, ArchitectureGraph):
+            root.append(_graph_diagram(page_id, name, source))
+        else:
+            root.append(_scene_diagram(page_id, name, source))
+    return ET.tostring(root, encoding="unicode", xml_declaration=True) + "\n"
+
+
+def _graph_diagram(page_id: str, name: str, graph: ArchitectureGraph) -> ET.Element:
+    diagram = ET.Element("diagram", {"id": page_id, "name": name})
     model = ET.SubElement(
         diagram, "mxGraphModel", {"dx": "1200", "dy": "800", "grid": "1", "page": "0"}
     )
@@ -174,7 +203,116 @@ def drawio(graph: ArchitectureGraph) -> str:
             },
         )
         ET.SubElement(cell, "mxGeometry", {"relative": "1", "as": "geometry"})
-    return ET.tostring(root, encoding="unicode", xml_declaration=True) + "\n"
+    return diagram
+
+
+def _scene_diagram(page_id: str, name: str, scene: Scene) -> ET.Element:
+    diagram = ET.Element("diagram", {"id": page_id, "name": name})
+    model = ET.SubElement(
+        diagram,
+        "mxGraphModel",
+        {
+            "dx": str(max(1, int(scene.width))),
+            "dy": str(max(1, int(scene.height))),
+            "grid": "1",
+            "page": "1",
+            "pageWidth": str(max(1, int(scene.width))),
+            "pageHeight": str(max(1, int(scene.height))),
+        },
+    )
+    mxroot = ET.SubElement(model, "root")
+    ET.SubElement(mxroot, "mxCell", {"id": "0"})
+    ET.SubElement(mxroot, "mxCell", {"id": "1", "parent": "0"})
+    for index, item in enumerate(scene.items):
+        if isinstance(item, Box):
+            fill = item.fill or PALETTE.get(item.style, PALETTE["application"])
+            stroke = item.stroke or STROKES.get(item.style, PALETTE["line"])
+            shape = (
+                "shape=cylinder3;boundedLbl=1;size=10;" if item.style == "data" else "rounded=1;"
+            )
+            dash = "dashed=1;" if item.dashed else ""
+            cell = ET.SubElement(
+                mxroot,
+                "mxCell",
+                {
+                    "id": f"{page_id}-box-{index}",
+                    "value": "\n".join(item.lines),
+                    "style": f"{shape}whiteSpace=wrap;html=0;fillColor={fill};"
+                    f"strokeColor={stroke};{dash}",
+                    "vertex": "1",
+                    "parent": "1",
+                },
+            )
+            ET.SubElement(
+                cell,
+                "mxGeometry",
+                {
+                    "x": str(item.x),
+                    "y": str(item.y),
+                    "width": str(item.w),
+                    "height": str(item.h),
+                    "as": "geometry",
+                },
+            )
+        elif isinstance(item, Text):
+            align = {"start": "left", "middle": "center", "end": "right"}[item.anchor]
+            width = max(40.0, len(item.text) * item.size * 0.6)
+            x = item.x if item.anchor == "start" else item.x - width / 2
+            if item.anchor == "end":
+                x = item.x - width
+            cell = ET.SubElement(
+                mxroot,
+                "mxCell",
+                {
+                    "id": f"{page_id}-text-{index}",
+                    "value": item.text,
+                    "style": f"text;html=0;align={align};verticalAlign=middle;"
+                    f"fontSize={item.size:.0f};fontColor={item.color};"
+                    f"{'fontStyle=1;' if item.bold else ''}",
+                    "vertex": "1",
+                    "parent": "1",
+                },
+            )
+            ET.SubElement(
+                cell,
+                "mxGeometry",
+                {
+                    "x": str(x),
+                    "y": str(item.y - item.size),
+                    "width": str(width),
+                    "height": str(item.size * 1.6),
+                    "as": "geometry",
+                },
+            )
+        elif isinstance(item, Line) and item.points:
+            style = "html=0;rounded=0;"
+            style += "endArrow=classic;" if item.arrow else "endArrow=none;"
+            if item.dashed:
+                style += "dashed=1;"
+            cell = ET.SubElement(
+                mxroot,
+                "mxCell",
+                {
+                    "id": f"{page_id}-line-{index}",
+                    "style": style,
+                    "edge": "1",
+                    "parent": "1",
+                },
+            )
+            if item.label:
+                cell.set("value", item.label)
+            geom = ET.SubElement(cell, "mxGeometry", {"relative": "1", "as": "geometry"})
+            start_x, start_y = item.points[0]
+            end_x, end_y = item.points[-1]
+            ET.SubElement(
+                geom, "mxPoint", {"x": str(start_x), "y": str(start_y), "as": "sourcePoint"}
+            )
+            ET.SubElement(geom, "mxPoint", {"x": str(end_x), "y": str(end_y), "as": "targetPoint"})
+            if len(item.points) > 2:
+                array = ET.SubElement(geom, "Array", {"as": "points"})
+                for point_x, point_y in item.points[1:-1]:
+                    ET.SubElement(array, "mxPoint", {"x": str(point_x), "y": str(point_y)})
+    return diagram
 
 
 def safe_id(value: str) -> str:
