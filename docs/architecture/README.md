@@ -1,8 +1,10 @@
 # Architecture
 
-ArchAI is a modular local CLI. Component commands and `arch auto` share one registry, one
-canonical `EnterpriseDesign`, a linked `ArchitectureGraph`, immutable revisions, and a
-project-folder export (documents, diagrams, config, infrastructure, state).
+ArchAI 1.0.0 is a modular local CLI. `arch auto` designs every applicable component.
+A component command asks the same opening description on a new project, then designs only
+that component, so the revision stays partial until the rest are saved. Both share one
+registry, one canonical `EnterpriseDesign`, a linked `ArchitectureGraph`, immutable
+revisions, and a project-folder export (documents, diagrams, config, infrastructure, state).
 
 ## Run flow
 
@@ -10,7 +12,8 @@ project-folder export (documents, diagrams, config, infrastructure, state).
 arch auto / arch <component>
   -> inputs (files, --idea, --answers, stdin) merged into a requirements draft
   -> Enterprise Requirements Architect: intake analysis (suggestions + clarifying questions)
-  -> guided interview on a terminal (persisted after every answer; resumable)
+  -> guided interview on a terminal, starting with the application description
+     (persisted after every answer; resumable)
   -> RequirementsSpec validated
   -> deterministic baseline for every scoped component (apply_scope)
   -> Supervisor
