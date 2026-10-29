@@ -14,21 +14,14 @@ from typing import Any
 import yaml
 
 from archai.application.designer import has_rag
+from archai.domain.scale import (
+    QUEUE_KINDS,
+    WORKLOAD_KINDS,
+    minimum_replicas,
+    replica_ceiling,
+)
 from archai.schemas.models import EnterpriseDesign, Service
 
-WORKLOAD_KINDS = {
-    "frontend",
-    "application",
-    "orchestration",
-    "policy",
-    "ai-gateway",
-    "retrieval",
-    "ingestion",
-    "worker",
-    "tool-executor",
-    "integration",
-}
-QUEUE_KINDS = {"worker", "ingestion"}
 PUBLIC_KINDS = {"application", "orchestration", "frontend"}
 
 
@@ -43,11 +36,6 @@ def _slug(value: str) -> str:
 
 def workloads(design: EnterpriseDesign) -> list[Service]:
     return [service for service in design.services if service.kind in WORKLOAD_KINDS]
-
-
-def _max_replicas(design: EnterpriseDesign) -> int:
-    workers = design.capacity.worker_count if design.capacity else 2
-    return max(3, min(30, workers * 3))
 
 
 def compile_infrastructure(design: EnterpriseDesign) -> dict[str, str]:
@@ -565,8 +553,8 @@ def _container_apps(design: EnterpriseDesign, services: list[Service]) -> str:
             f"""    {hcl(service.id)} = {{
       ingress      = {str(not queue).lower()}
       queue_scaled = {str(queue).lower()}
-      min_replicas = {0 if queue else 1}
-      max_replicas = {_max_replicas(design)}
+      min_replicas = {minimum_replicas(design, service.kind)}
+      max_replicas = {replica_ceiling(design)}
     }}"""
         )
     body = "\n".join(entries)
@@ -1496,8 +1484,8 @@ def _kubernetes(design: EnterpriseDesign) -> dict[str, str]:
                     "metadata": {"name": name, "namespace": namespace},
                     "spec": {
                         "scaleTargetRef": {"name": name},
-                        "minReplicaCount": 0,
-                        "maxReplicaCount": _max_replicas(design),
+                        "minReplicaCount": minimum_replicas(design, service.kind),
+                        "maxReplicaCount": replica_ceiling(design),
                         "triggers": [trigger],
                     },
                 }
@@ -1522,8 +1510,8 @@ def _kubernetes(design: EnterpriseDesign) -> dict[str, str]:
                             "kind": "Deployment",
                             "name": name,
                         },
-                        "minReplicas": 2,
-                        "maxReplicas": _max_replicas(design),
+                        "minReplicas": minimum_replicas(design, service.kind),
+                        "maxReplicas": replica_ceiling(design),
                         "metrics": [
                             {
                                 "type": "Resource",
