@@ -62,6 +62,17 @@ def _is_azure(data: dict[str, Any]) -> bool:
     return str(data.get("profile") or "azure-aca").startswith("azure")
 
 
+def keeps(component: str) -> Callable[[dict[str, Any]], bool]:
+    def check(data: dict[str, Any]) -> bool:
+        return component not in (data.get("excluded_components") or [])
+
+    return check
+
+
+def rag_in_scope(data: dict[str, Any]) -> bool:
+    return is_rag(data) and keeps("rag")(data)
+
+
 def _peak_check(value: Any, data: dict[str, Any]) -> str | None:
     avg = data.get("avg_rps")
     try:
@@ -116,8 +127,10 @@ QUESTIONS: tuple[Question, ...] = (
         "Which application roles or permission levels are needed?",
         "list",
         False,
-        "Used for the RBAC/ABAC design, e.g. reader, agent, approver, admin.",
+        "Used for the RBAC/ABAC design, e.g. reader, agent, approver, admin. "
+        "Say 'no RBAC' or 'RBAC excluded' to leave user roles out of the design.",
         default=lambda data: ["user", "admin"],
+        when=keeps("auth"),
     ),
     Question(
         "REQ-CLIENT_CHANNELS",
@@ -154,13 +167,37 @@ QUESTIONS: tuple[Question, ...] = (
         allow_other=False,
     ),
     Question(
+        "REQ-EXCLUDED",
+        "excluded_components",
+        "Optional capabilities",
+        "Which optional parts are not required for this application?",
+        "multichoice",
+        False,
+        "cache, RBAC, cloud deployment, retrieval, observability, evaluation, workflows, "
+        "guardrails, resilience. Enter takes the best fit for this workload. Type none to keep "
+        "them all. 'cache excluded', 'I don't need RBAC', or 'deployment excluded' drops that part.",
+        (
+            "cache",
+            "RBAC",
+            "cloud deployment",
+            "retrieval",
+            "observability",
+            "evaluation",
+            "workflows",
+            "guardrails",
+            "resilience",
+            "none",
+        ),
+    ),
+    Question(
         "REQ-INTEGRATIONS",
         "integrations",
         "AI capabilities",
         "Which business systems or tools must it integrate with?",
         "list",
         False,
-        "Examples: ServiceNow, Salesforce, SAP, Jira, internal REST APIs. Leave empty if none.",
+        "Examples: ServiceNow, Salesforce, SAP, Jira, internal REST APIs. "
+        "Press Enter or type none and ArchAI picks the best fit from the project.",
         when=uses_tools,
     ),
     Question(
@@ -170,8 +207,9 @@ QUESTIONS: tuple[Question, ...] = (
         "Which knowledge sources feed retrieval?",
         "list",
         False,
-        "Examples: SharePoint, Confluence, product PDFs in Blob/S3, a SQL warehouse.",
-        when=is_rag,
+        "Examples: SharePoint, Confluence, product PDFs in Blob/S3, a SQL warehouse. "
+        "Say 'retrieval excluded' to leave RAG out of the design.",
+        when=rag_in_scope,
     ),
     Question(
         "REQ-DOCUMENTS_PER_DAY",
@@ -182,7 +220,7 @@ QUESTIONS: tuple[Question, ...] = (
         False,
         "Drives the asynchronous ingestion path and worker sizing.",
         default=lambda data: 500,
-        when=is_rag,
+        when=rag_in_scope,
     ),
     # ------------------------------------------------------------------ traffic
     Question(
@@ -278,6 +316,7 @@ QUESTIONS: tuple[Question, ...] = (
         ("azure-aca", "azure-aks", "aws-eks", "agnostic"),
         allow_other=False,
         default=lambda data: "azure-aca",
+        when=keeps("infra"),
     ),
     Question(
         "REQ-REGION",
@@ -306,7 +345,10 @@ QUESTIONS: tuple[Question, ...] = (
         "Any existing platform services the design must reuse?",
         "list",
         False,
-        "Examples: existing APIM instance, hub VNet, Splunk, Datadog. Leave empty if none.",
+        "Examples: existing APIM instance, hub VNet, Splunk, Datadog. "
+        "Press Enter or type none and ArchAI picks the platform baseline for this deployment. "
+        "Say 'deployment excluded' or 'I don't need cloud deployment' to leave hosting out.",
+        when=keeps("infra"),
     ),
     # ------------------------------------------------------------------ identity and security
     Question(
@@ -316,9 +358,11 @@ QUESTIONS: tuple[Question, ...] = (
         "Which identity provider signs users in (OIDC/OAuth 2.0)?",
         "choice",
         False,
-        "Drives the OAuth flows, token validation, and workload identity design.",
+        "Drives the OAuth flows, token validation, and workload identity design. "
+        "Say 'no RBAC' to leave user authorization out of the design.",
         IDPS,
         default=lambda data: "Entra ID",
+        when=keeps("auth"),
     ),
     Question(
         "REQ-TENANT_ISOLATION",
@@ -427,6 +471,16 @@ def is_missing(value: Any) -> bool:
     return value is None or value == "" or value == []
 
 
+def field_unanswered(question: Question, data: dict[str, Any]) -> bool:
+    """True when this question still needs an answer.
+
+    An empty exclusion list is an answer: it keeps every optional part.
+    """
+    if question.field == "excluded_components":
+        return data.get("excluded_components") is None
+    return is_missing(data.get(question.field))
+
+
 def missing_questions(
     data: dict[str, Any], *, critical_only: bool = False, include_optional: bool = True
 ) -> list[Question]:
@@ -439,7 +493,7 @@ def missing_questions(
             continue
         if not question.applies(data):
             continue
-        if is_missing(data.get(question.field)):
+        if field_unanswered(question, data):
             result.append(question)
     return result
 

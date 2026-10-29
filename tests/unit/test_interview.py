@@ -76,6 +76,7 @@ OPTIONAL = {
     "latency_p95_ms": 8000,
     "rto_minutes": 240,
     "rpo_minutes": 60,
+    "excluded_components": [],
 }
 FULL = {**COMPLETE, **OPTIONAL}
 
@@ -157,6 +158,68 @@ def test_critical_questions_cannot_be_skipped_and_clarifications_are_recorded():
         {"question": "Which ticketing system executes refunds?", "answer": "ServiceNow"}
     ]
     assert result["business_outcome"] == "Refund faster"  # edited from the review table
+
+
+def test_empty_or_none_chooses_the_project_fit_and_records_the_assumption():
+    data = dict(FULL)
+    for field in (
+        "user_roles",
+        "data_sources",
+        "existing_services",
+        "compliance",
+        "monthly_budget",
+    ):
+        del data[field]
+    data["excluded_components"] = []
+    data["archetypes"] = ["enterprise-rag", "tool-using-agent"]
+    data["idea"] = "Support copilot that answers from policy documents and can file a ticket."
+    io = ScriptedIO(["", "none", "", "none", "none", "", "5000"])
+    result = InterviewSession(io, data).run()
+    assert result["user_roles"] == ["agent", "approver", "admin"]
+    assert result["integrations"] == ["ServiceNow"]
+    assert result["data_sources"] == ["SharePoint"]
+    assert result["existing_services"] == ["Azure API Management", "Azure Container Apps"]
+    assert result["compliance"] == ["GDPR"]
+    assert result["monthly_budget"] == "5000"
+    assert any("required" in error for error in io.errors)
+    assumed = {item["id"] for item in result["assumptions"]}
+    assert "assumption-integrations" in assumed
+    assert "assumption-data-sources" in assumed
+    assert "assumption-existing-services" in assumed
+    assert "assumption-monthly-budget" not in assumed
+    evidence = {item["location"]: item for item in result["evidence"]}
+    assert evidence["REQ-INTEGRATIONS"]["provenance"] == "assumed"
+    assert "ServiceNow" in evidence["REQ-INTEGRATIONS"]["rationale"]
+
+
+def test_exclusion_phrases_drop_optional_parts_and_keep_the_rest():
+    from archai.interview.exclusions import exclusion_targets
+
+    assert exclusion_targets("I don't need cache") == ["cache"]
+    assert exclusion_targets("cache excluded") == ["cache"]
+    assert exclusion_targets("cache not required") == ["cache"]
+    assert exclusion_targets("I don't need RBAC") == ["auth"]
+    assert exclusion_targets("deployment excluded") == ["infra"]
+    assert exclusion_targets("I don't need cloud deployment") == ["infra"]
+    assert exclusion_targets("ServiceNow") == []
+
+    data = dict(FULL)
+    del data["excluded_components"]
+    del data["existing_services"]
+    io = ScriptedIO(["cache excluded", "deployment excluded"])
+    result = InterviewSession(io, data, review=False).run()
+    assert result["excluded_components"] == ["cache", "infra"]
+    assert result["existing_services"] == []
+    assert result["identity_provider"] == "Entra ID"
+
+
+def test_not_required_on_the_open_question_drops_that_component():
+    data = dict(FULL)
+    del data["user_roles"]
+    io = ScriptedIO(["not required"])
+    result = InterviewSession(io, data, review=False).run()
+    assert result["user_roles"] == []
+    assert "auth" in result["excluded_components"]
 
 
 def test_conflicts_are_resolved_interactively():

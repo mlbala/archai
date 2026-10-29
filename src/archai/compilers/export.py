@@ -9,6 +9,7 @@ import yaml
 
 from archai.application.registry import AUTO_COMPONENTS, COMPONENTS
 from archai.compilers.diagram import drawio
+from archai.compilers.master import master_design_document
 from archai.compilers.report import (
     complete_document,
     component_document,
@@ -252,6 +253,14 @@ def export_revision(
                     "Complete_AI_System_Design.pdf",
                     complete_document(design, graph, diagnostics),
                     "Complete AI System Design",
+                ),
+            )
+            pdf_jobs.insert(
+                1,
+                (
+                    "master_design/Master_Design.pdf",
+                    master_design_document(design, diagnostics),
+                    "Master Design",
                 ),
             )
         for relative, content, title in pdf_jobs:

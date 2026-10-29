@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from archai.errors import InterviewPaused
+from archai.interview.exclusions import (
+    QUESTION_COMPONENT,
+    exclusion_targets,
+    normalize_excluded,
+)
+from archai.interview.inference import best_answer
 from archai.interview.questions import (
     QUESTION_BY_FIELD,
     QUESTIONS,
     Question,
+    field_unanswered,
     format_value,
     is_missing,
     parse_answer,
@@ -20,8 +28,15 @@ BACK_WORDS = {"back", "b", "<"}
 HELP_WORDS = {"?", "help", "h"}
 SKIP_WORDS = {"skip", "-"}
 EXIT_WORDS = {"exit", "quit", "save", "q"}
+UNDECIDED_WORDS = {"none", "n/a", "na"}
+_BARE_EXCLUSION = re.compile(
+    r"^(?:i |we )?(?:don'?t|do not) need(?: it| this| that)?$"
+    r"|^not required$|^not needed$|^excluded$|^exclude(?: it)?$|^no need$",
+    re.IGNORECASE,
+)
 COMMAND_HELP = (
-    "Commands: Enter = accept default · back · skip (optional only) · ? help · save = exit"
+    "Commands: Enter or none = best fit from the project · back · skip (optional only) · "
+    "? help · save = exit"
 )
 
 
@@ -57,6 +72,9 @@ class _Back(Exception):
     pass
 
 
+_UNRESOLVED = object()
+
+
 def field_label(question: Question) -> str:
     return question.field.replace("_", " ").capitalize()
 
@@ -81,7 +99,7 @@ class InterviewSession:
         self.targets = {
             question.field
             for question in QUESTIONS
-            if is_missing(data.get(question.field)) or question.field in self.suggestions
+            if field_unanswered(question, data) or question.field in self.suggestions
         }
         answered = {
             str(item.get("question"))
@@ -162,7 +180,12 @@ class InterviewSession:
         current = self.data.get(question.field)
         if not is_missing(current):
             return current, None
-        return question.default_value(self.data), None
+        chosen = best_answer(question, self.data)
+        if chosen is not None:
+            value, rationale = chosen
+            if not is_missing(value):
+                return value, f"Best fit — {rationale}"
+        return None, None
 
     def _ask_question(self, question: Question, label: str, allow_back: bool = True) -> None:
         while True:
@@ -189,35 +212,71 @@ class InterviewSession:
                 if question.critical:
                     self.io.error("This answer is required for a safe design.")
                     continue
-                self.data[question.field] = [] if question.kind in {"list", "multichoice"} else None
-                self._save()
+                self._store_blank(question)
                 return
-            if not raw:
-                if default_text is None:
+            if question.field == "excluded_components" and command in {"none", "not required"}:
+                self._keep_optional_parts(question)
+                return
+            related = QUESTION_COMPONENT.get(question.field)
+            if related is not None and _BARE_EXCLUSION.match(raw):
+                self._exclude([related])
+                self._finish_exclusion(question)
+                return
+            targets = exclusion_targets(raw)
+            if targets:
+                self._exclude(targets)
+                if question.field == "excluded_components" or (
+                    related is not None and related in targets
+                ):
+                    self._finish_exclusion(question)
+                    return
+                self.io.info(
+                    "Left out of the design: "
+                    + ", ".join(targets)
+                    + ". This question still needs an answer."
+                )
+                continue
+            deferred = command in UNDECIDED_WORDS
+            accept_shown = (not raw) or (default_text is not None and raw == default_text)
+            if deferred or accept_shown:
+                value, rationale = self._deferred_value(question, default, hint, deferred)
+                if value is _UNRESOLVED:
                     if question.critical:
                         self.io.error(
                             "This answer is required. Type 'save' to stop and resume later."
                         )
                         continue
-                    self.data[question.field] = (
-                        [] if question.kind in {"list", "multichoice"} else None
-                    )
-                    self._save()
+                    self._store_blank(question)
                     return
-                raw_value: Any = default
-            else:
-                raw_value = raw
-            try:
-                value = parse_answer(question, raw_value, self.data)
-            except ValueError as exc:
-                self.io.error(str(exc))
+                if self._accept(question, value, rationale):
+                    return
                 continue
-            self.data[question.field] = value
-            accepted_suggestion = not raw and question.field in self.suggestions
-            self._record_evidence(question, value, accepted_suggestion)
-            self.suggestions.pop(question.field, None)
-            self._save()
-            return
+            if self._accept(question, raw, None):
+                return
+
+    def _deferred_value(
+        self, question: Question, default: Any, hint: str | None, deferred: bool
+    ) -> tuple[Any, str | None]:
+        """Value to store when the user presses Enter or types none."""
+        if deferred:
+            if question.field in self.suggestions:
+                return self.suggestions[question.field].value, None
+            chosen = best_answer(question, self.data)
+            if chosen is not None and not is_missing(chosen[0]):
+                return chosen
+            if not is_missing(default):
+                shown = None
+                if hint and hint.startswith("Best fit — "):
+                    shown = hint.removeprefix("Best fit — ")
+                return default, shown
+            return _UNRESOLVED, None
+        if is_missing(default):
+            return _UNRESOLVED, None
+        if hint and hint.startswith("Best fit — "):
+            return default, hint.removeprefix("Best fit — ")
+        if hint and hint.startswith("AI suggestion — "):
+            return default, None
+        return default, None
 
     def _ask_clarification(self, text: str, label: str) -> None:
         while True:
@@ -249,7 +308,100 @@ class InterviewSession:
             self.data["clarifications"] = clarifications
         self._save()
 
-    def _record_evidence(self, question: Question, value: Any, from_suggestion: bool) -> None:
+    def _exclude(self, names: list[str]) -> None:
+        current = normalize_excluded(self.data.get("excluded_components")) or []
+        for name in names:
+            if name not in current:
+                current.append(name)
+        self.data["excluded_components"] = current
+
+    def _keep_optional_parts(self, question: Question) -> None:
+        self.data["excluded_components"] = []
+        self.suggestions.pop(question.field, None)
+        self._record_evidence(question, [], False, None)
+        self.io.info("Optional parts stay in the design.")
+        self._save()
+
+    def _finish_exclusion(self, question: Question) -> None:
+        excluded = self.data.get("excluded_components") or []
+        if question.field == "profile":
+            self.data["profile"] = "agnostic"
+        elif question.field in {"existing_services", "user_roles", "data_sources"}:
+            self.data[question.field] = []
+        elif question.field == "identity_provider":
+            self.data["identity_provider"] = None
+        elif question.field == "documents_per_day":
+            self.data["documents_per_day"] = None
+        elif question.field == "excluded_components":
+            self.data["excluded_components"] = excluded
+        self.suggestions.pop(question.field, None)
+        self._record_evidence(question, self.data.get(question.field), False, None)
+        self.io.info("Left out of the design: " + ", ".join(excluded) + ".")
+        self._save()
+
+    def _store_blank(self, question: Question) -> None:
+        self.data[question.field] = [] if question.kind in {"list", "multichoice"} else None
+        self.suggestions.pop(question.field, None)
+        self._clear_assumption(question)
+        self._save()
+
+    def _accept(self, question: Question, raw_value: Any, rationale: str | None) -> bool:
+        try:
+            value = parse_answer(question, raw_value, self.data)
+        except ValueError as exc:
+            self.io.error(str(exc))
+            return False
+        if question.field == "excluded_components":
+            value = normalize_excluded(value) or []
+        self.data[question.field] = value
+        from_suggestion = (
+            rationale is None
+            and question.field in self.suggestions
+            and raw_value == self.suggestions[question.field].value
+        )
+        self.suggestions.pop(question.field, None)
+        self._clear_assumption(question)
+        if rationale:
+            self._add_assumption(question, value, rationale)
+            self.io.info(f"{field_label(question)}: {format_value(value)}. {rationale}")
+        self._record_evidence(question, value, from_suggestion, rationale)
+        self._save()
+        return True
+
+    def _assumption_id(self, question: Question) -> str:
+        return f"assumption-{question.field.replace('_', '-')}"
+
+    def _clear_assumption(self, question: Question) -> None:
+        identifier = self._assumption_id(question)
+        self.data["assumptions"] = [
+            item
+            for item in self.data.get("assumptions") or []
+            if not (isinstance(item, dict) and item.get("id") == identifier)
+        ]
+
+    def _add_assumption(self, question: Question, value: Any, rationale: str) -> None:
+        assumptions = [
+            item
+            for item in self.data.get("assumptions") or []
+            if isinstance(item, dict) and item.get("id") != self._assumption_id(question)
+        ]
+        assumptions.append(
+            {
+                "id": self._assumption_id(question),
+                "statement": f"{question.field} = {format_value(value)}",
+                "rationale": rationale[:300],
+                "critical": question.critical,
+            }
+        )
+        self.data["assumptions"] = assumptions
+
+    def _record_evidence(
+        self,
+        question: Question,
+        value: Any,
+        from_suggestion: bool,
+        rationale: str | None = None,
+    ) -> None:
         evidence = [
             item
             for item in self.data.get("evidence") or []
@@ -259,15 +411,22 @@ class InterviewSession:
                 and item.get("location") == question.id
             )
         ]
+        if rationale:
+            provenance = "assumed"
+            recorded = rationale
+        elif from_suggestion:
+            provenance = "provided"
+            recorded = "confirmed AI suggestion in guided interview"
+        else:
+            provenance = "provided"
+            recorded = "answered in guided interview"
         evidence.append(
             {
                 "source_id": "interview",
                 "location": question.id,
                 "value": value,
-                "provenance": "provided",
-                "rationale": "confirmed AI suggestion in guided interview"
-                if from_suggestion
-                else "answered in guided interview",
+                "provenance": provenance,
+                "rationale": recorded,
             }
         )
         self.data["evidence"] = evidence

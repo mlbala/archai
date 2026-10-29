@@ -5,7 +5,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -124,11 +124,20 @@ class RequirementsSpec(StrictModel):
     rpo_minutes: int | None = Field(default=None, ge=0)
     documents_per_day: int | None = Field(default=None, ge=0)
     existing_services: list[str] = Field(default_factory=list)
+    # None means the interview has not answered. [] means every optional part stays.
+    excluded_components: list[str] | None = None
     notes: str | None = None
     clarifications: list[Clarification] = Field(default_factory=list)
     assumptions: list[Assumption] = Field(default_factory=list)
     conflicts: list[Conflict] = Field(default_factory=list)
     evidence: list[EvidenceRef] = Field(default_factory=list)
+
+    @field_validator("excluded_components", mode="before")
+    @classmethod
+    def normalize_excluded_components(cls, value: Any) -> list[str] | None:
+        from archai.interview.exclusions import normalize_excluded
+
+        return normalize_excluded(value)
 
     @model_validator(mode="after")
     def validate_peak(self) -> RequirementsSpec:

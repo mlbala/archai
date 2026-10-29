@@ -361,6 +361,9 @@ def print_summary(
         lines.append(f"[bold]Open[/bold] {bundle / main_pdf}")
     elif pdfs:
         lines.append(f"[bold]Open[/bold] {bundle / pdfs[0]}")
+    master_pdf = next((path for path in pdfs if path.startswith("master_design/")), None)
+    if master_pdf:
+        lines.append(f"[bold]Master design[/bold] {bundle / master_pdf}")
     console.print(
         Panel(
             "\n".join(lines),

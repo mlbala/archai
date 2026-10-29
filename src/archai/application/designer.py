@@ -185,7 +185,24 @@ def new_design(project: str, requirements: RequirementsSpec) -> EnterpriseDesign
     return EnterpriseDesign(project=project, requirements=requirements)
 
 
+_EXCLUSION_REASONS = {
+    "cache": "Response caching is not required for this application",
+    "auth": "User RBAC is not required for this application",
+    "infra": "Cloud deployment is not required for this application",
+    "rag": "Retrieval is not required for this application",
+    "observe": "Observability is not required for this application",
+    "eval": "Evaluation is not required for this application",
+    "workflow": "Workflows are not required for this application",
+    "guard": "Guardrails are not required for this application",
+    "resilience": "Resilience planning is not required for this application",
+}
+
+
 def not_applicable_reason(component: str, req: RequirementsSpec) -> str | None:
+    from archai.interview.exclusions import effective_exclusions
+
+    if component in effective_exclusions(req.model_dump(mode="json")):
+        return _EXCLUSION_REASONS.get(component, "Excluded in the requirements")
     if component == "rag" and not has_rag(req):
         return "No retrieval archetype or knowledge sources in the requirements"
     return None
@@ -230,8 +247,26 @@ def apply_scope(
 
 
 def _clear_component(design: EnterpriseDesign, component: str) -> None:
-    if component == "rag":
+    replace_component_decisions(design, component)
+    if component == "cache":
+        design.cache_policy = None
+    elif component == "auth":
+        design.identity_policy = None
+    elif component == "infra":
+        design.deployment = None
+    elif component == "rag":
         design.rag_pipeline = None
+    elif component == "workflow":
+        design.workflows = []
+    elif component == "guard":
+        design.guardrails = []
+    elif component == "observe":
+        design.observability = None
+    elif component == "eval":
+        design.eval_plan = None
+    elif component == "resilience":
+        design.queue_policy = None
+        design.resilience = None
 
 
 def add_decision(

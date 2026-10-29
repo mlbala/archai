@@ -20,7 +20,8 @@ arch auto / arch <component>
        ProposalMerger: normalize IDs, drop dangling references, clamp values
        Design Verifier (role 5): findings; blocking ones trigger <= 2 targeted revision passes
   -> deterministic capacity/cost engine, policy invariants, manual decisions, locks
-  -> validation -> immutable revision -> export bundle (Markdown, PDF, diagrams, IaC, configs)
+  -> validation -> immutable revision -> export bundle (Markdown, PDF, diagrams, IaC, configs,
+     and master_design/Master_Design.pdf on a complete export)
 ```
 
 Each role call uses a scoped structured-output schema built from only the components in scope, so

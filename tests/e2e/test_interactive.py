@@ -29,8 +29,9 @@ def partial_requirements(tmp_path: Path) -> Path:
 
 def test_auto_interviews_for_missing_answers_then_designs_and_exports(tmp_path, interactive):
     source = partial_requirements(tmp_path)
-    # roles, channels, integrations, data sources, docs/day, existing services, IdP: defaults
-    answers = ["", "", "", "", "", "", "", "multi", "", "", "", "", "", "20000", ""]
+    # roles, channels, optional parts, integrations, data sources, docs/day,
+    # existing services, IdP: defaults
+    answers = ["", "", "", "", "", "", "", "", "multi", "", "", "", "", "", "20000", ""]
     result = runner.invoke(
         app,
         ["auto", "-p", "guided", "-f", str(source), "--output-dir", str(tmp_path / "out")],

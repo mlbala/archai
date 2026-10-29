@@ -10,6 +10,7 @@ import yaml
 from archai.application import service
 from archai.application.designer import build_graph
 from archai.compilers.export import export_revision, litellm_yaml, normalize_formats
+from archai.compilers.master import master_design_document
 from archai.compilers.report import complete_document, component_document
 from archai.compilers.scene import to_png, to_svg
 from archai.compilers.terraform import apim_policy_xml, compile_infrastructure
@@ -159,6 +160,7 @@ def test_component_export_is_scoped(tmp_path):
     assert "documents/Guardrails_Design.md" in paths
     assert "policies/guardrails.yaml" in paths
     assert "Complete_AI_System_Design.md" not in paths
+    assert "master_design/Master_Design.pdf" not in paths
     assert "litellm.yaml" not in paths
     assert not any(path.startswith("infrastructure/") for path in paths)
     assert (bundle / "diagrams/guardrails.mmd").exists()
@@ -202,6 +204,53 @@ def test_full_pdf_export(tmp_path):
     )
     pdfs = [item.path for item in manifest.artifacts if item.path.endswith(".pdf")]
     assert "Complete_AI_System_Design.pdf" in pdfs
+    assert "master_design/Master_Design.pdf" in pdfs
     assert len(pdfs) >= 15
     assert not [item for item in manifest.artifacts if item.status == "failed"]
     assert (bundle / "Complete_AI_System_Design.pdf").stat().st_size > 50_000
+    master_pdf = bundle / "master_design" / "Master_Design.pdf"
+    assert master_pdf.read_bytes().startswith(b"%PDF")
+    assert master_pdf.stat().st_size > 5_000
+
+
+def test_optional_components_are_removed_when_excluded(tmp_path):
+    requested = yaml.safe_load(REQUIREMENTS.read_text())
+    requested["excluded_components"] = ["cache", "RBAC", "cloud deployment"]
+    source = tmp_path / "excluded.yaml"
+    source.write_text(yaml.safe_dump(requested))
+    _, _, design = design_for(tmp_path, source=source)
+    assert design.components["cache"].status.value == "not_applicable"
+    assert design.cache_policy is None
+    assert design.components["auth"].status.value == "not_applicable"
+    assert design.identity_policy is None
+    assert design.components["infra"].status.value == "not_applicable"
+    assert design.deployment is None
+    assert design.components["system"].status.value == "valid"
+    assert design.services
+
+    batch = dict(requested)
+    batch.pop("excluded_components")
+    batch["idea"] = "Nightly pandas calculations over warehouse extracts. No user interaction."
+    batch["business_outcome"] = "Refresh planning figures before the business day."
+    batch["users"] = ["scheduler"]
+    batch["archetypes"] = ["classification-extraction"]
+    batch_path = tmp_path / "batch.yaml"
+    batch_path.write_text(yaml.safe_dump(batch))
+    _, _, quiet = design_for(tmp_path / "batch", source=batch_path)
+    assert quiet.components["cache"].status.value == "not_applicable"
+    assert quiet.components["auth"].status.value == "not_applicable"
+    assert quiet.components["infra"].status.value == "valid"
+    assert quiet.deployment is not None
+
+
+def test_master_design_lists_features_plan_and_sprints(tmp_path):
+    _, _, design = design_for(tmp_path)
+    document = master_design_document(design, [])
+    assert "# Master Design" in document
+    assert "## 1. Feature catalog" in document
+    assert "## 2. Development plan" in document
+    assert "## 3. Sprints" in document
+    assert "Sprint 1 — Foundation" in document
+    assert "Sprint 2 — Core path" in document
+    assert "not deployed" in document
+    assert "F-01" in document
