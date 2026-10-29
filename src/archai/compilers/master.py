@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from archai.application.registry import COMPONENTS
-from archai.compilers.report import DISCLAIMER, bullets, project_complete, source_label, table
+from archai.compilers.report import (
+    DISCLAIMER,
+    bullets,
+    join_en,
+    project_complete,
+    source_label,
+    table,
+)
 from archai.domain.scale import scale_targets
 from archai.schemas.models import (
     ComponentStatus,
@@ -17,25 +24,43 @@ from archai.schemas.models import (
 _SPRINTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
         "Sprint 1 — Foundation",
-        "Sign-in, tenant-scoped data, and the hosting baseline.",
+        "before the core path starts",
         ("auth", "data", "infra"),
     ),
     (
         "Sprint 2 — Core path",
-        "A user request completes through the gateway, the model route, and the primary workflow.",
+        "so a user request can complete",
         ("system", "api", "routing", "rag", "workflow"),
     ),
     (
         "Sprint 3 — Controls",
-        "Budget, cache, guardrails, and the threat model are in place before broader rollout.",
+        "before broader rollout",
         ("budget", "cache", "guard", "security"),
     ),
     (
         "Sprint 4 — Operate",
-        "Telemetry, evaluation, recovery, and the scale-up contract are in place.",
+        "before production traffic",
         ("observe", "eval", "resilience", "cost"),
     ),
 )
+_SPRINT_NOUNS: dict[str, str] = {
+    "auth": "sign-in",
+    "data": "tenant-scoped data",
+    "infra": "the hosting baseline",
+    "system": "the gateway",
+    "api": "the API",
+    "routing": "the model route",
+    "rag": "retrieval",
+    "workflow": "the primary workflow",
+    "budget": "budget",
+    "cache": "cache",
+    "guard": "guardrails",
+    "security": "the threat model",
+    "observe": "telemetry",
+    "eval": "evaluation",
+    "resilience": "recovery",
+    "cost": "the scale-up contract",
+}
 _FEATURE_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
     (("budget", "token", "spend", "cost"), ("budget", "cost", "routing"), "Sprint 3 — Controls"),
     (("retriev", "document", "citation", "ground", "rag"), ("rag", "data"), "Sprint 2 — Core path"),
@@ -87,8 +112,8 @@ def master_design_document(
         "",
         "This document is the delivery view of this revision: features, build order, and "
         "sprint slices. The high-level design is the architecture picture. The low-level "
-        "design walks each hop. `Complete_AI_System_Design` is the component archive. A "
-        "sprint is a build slice, not a calendar commitment. Dates and team size stay with "
+        "design walks each hop. One document per component is in `documents/components/`. "
+        "A sprint is a build slice, not a calendar commitment. Dates and team size stay with "
         "the people running the project.",
         "",
         "## 1. Feature catalog",
@@ -338,11 +363,19 @@ def _present_names(design: EnterpriseDesign, names: tuple[str, ...]) -> tuple[st
 
 def _active_sprints(design: EnterpriseDesign) -> list[tuple[str, str, tuple[str, ...]]]:
     active: list[tuple[str, str, tuple[str, ...]]] = []
-    for title, goal, names in _SPRINTS:
+    for title, suffix, names in _SPRINTS:
         present = _present_names(design, names)
         if present:
-            active.append((title, goal, present))
+            active.append((title, _sprint_goal(present, suffix), present))
     return active
+
+
+def _sprint_goal(present: tuple[str, ...], suffix: str) -> str:
+    phrases = [_SPRINT_NOUNS[name] for name in present if name in _SPRINT_NOUNS]
+    if not phrases:
+        return suffix[0].upper() + suffix[1:] + "."
+    joined = join_en(phrases)
+    return f"{joined[0].upper()}{joined[1:]} are in place {suffix}."
 
 
 def _component_titles(design: EnterpriseDesign, names: tuple[str, ...]) -> str:

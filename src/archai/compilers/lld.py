@@ -55,8 +55,8 @@ def low_level_design_document(
         "",
         "This is the implementation review document for this revision. Each step is a hop "
         "the owning service must implement. The high-level design has the system picture. "
-        "The master design has the build order. `Complete_AI_System_Design` is the component "
-        "archive. Open `system.drawio` in this folder in diagrams.net.",
+        "The master design has the build order. Component documents live in "
+        "`documents/components/`. Open `diagrams/lld.drawio` in diagrams.net.",
         "",
         "## 1. Service index",
         "",
@@ -80,8 +80,6 @@ def low_level_design_document(
     else:
         lines.append("_No services on this revision._")
     lines += ["", "## 2. Interactive request", ""]
-    if "architecture" in by_key:
-        lines += diagram_block(by_key["architecture"], "###")
     if "request" in by_key:
         lines += diagram_block(by_key["request"], "###")
     lines.append("Implement these hops in order. IDs match the service index.")
@@ -89,8 +87,8 @@ def low_level_design_document(
     lines += _hop_sections(hops, "###")
     lines += ["## 3. Other paths", ""]
     lines.append(
-        "Each path is a hop walk compiled from the same contracts, workflows, and policies "
-        "as the diagrams."
+        "Compact hop tables compiled from the same contracts, workflows, and policies as "
+        "the diagrams. Interactive hops above carry owner, interface, payload, and failure."
     )
     lines.append("")
     used_views: set[str] = set()
@@ -99,7 +97,12 @@ def low_level_design_document(
         if walk.view_key and walk.view_key in by_key:
             lines += diagram_block(by_key[walk.view_key], "####")
             used_views.add(walk.view_key)
-        lines += _hop_sections(walk.hops, "####")
+        if walk.hops:
+            lines += table(
+                ["Step", "From", "To", "Action", "Owner"],
+                [[hop.number, hop.source, hop.target, hop.action, hop.owner] for hop in walk.hops],
+            )
+            lines.append("")
     for key in ("budget", "recovery"):
         if key in by_key and key not in used_views:
             lines += diagram_block(by_key[key], "###")

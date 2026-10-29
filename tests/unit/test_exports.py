@@ -164,9 +164,10 @@ def test_component_export_is_scoped(tmp_path):
     paths = {item.path for item in manifest.artifacts}
     assert "documents/components/Guardrails_Design.md" in paths
     assert "config/policies/guardrails.yaml" in paths
-    assert "documents/04-complete/Complete_AI_System_Design.md" not in paths
-    assert "documents/03-master/Master_Design.pdf" not in paths
-    assert "documents/01-hld/High_Level_Design.md" not in paths
+    assert "documents/Master_Design.md" not in paths
+    assert "documents/Master_Design.pdf" not in paths
+    assert "documents/High_Level_Design.md" not in paths
+    assert "documents/Complete_AI_System_Design.md" not in paths
     assert "config/gateway/litellm.yaml" not in paths
     assert not any(path.startswith("infrastructure/") for path in paths)
     assert (bundle / "diagrams/mermaid/guardrails.mmd").exists()
@@ -210,19 +211,20 @@ def test_full_pdf_export(tmp_path):
         store, revision, normalize_formats("pdf,md"), [*service.auto_scope()]
     )
     pdfs = [item.path for item in manifest.artifacts if item.path.endswith(".pdf")]
-    assert "documents/04-complete/Complete_AI_System_Design.pdf" in pdfs
-    assert "documents/03-master/Master_Design.pdf" in pdfs
-    assert "documents/01-hld/High_Level_Design.pdf" in pdfs
-    assert "documents/02-lld/Low_Level_Design.pdf" in pdfs
-    assert len(pdfs) >= 17
+    assert "documents/Master_Design.pdf" in pdfs
+    assert "documents/High_Level_Design.pdf" in pdfs
+    assert "documents/Low_Level_Design.pdf" in pdfs
+    assert "documents/Complete_AI_System_Design.pdf" not in pdfs
+    assert len(pdfs) >= 16
     assert not [item for item in manifest.artifacts if item.status == "failed"]
-    assert (bundle / "documents/04-complete/Complete_AI_System_Design.pdf").stat().st_size > 50_000
-    master_pdf = bundle / "documents/03-master" / "Master_Design.pdf"
+    master_pdf = bundle / "documents" / "Master_Design.pdf"
     assert master_pdf.read_bytes().startswith(b"%PDF")
     assert master_pdf.stat().st_size > 5_000
     assert (bundle / "README.md").exists()
     assert not (bundle / "Complete_AI_System_Design.pdf").exists()
     assert not (bundle / "enterprise_design.json").exists()
+    assert bundle == store.root
+    assert not (store.root / "exports").exists()
 
 
 def test_optional_components_are_removed_when_excluded(tmp_path):
@@ -239,6 +241,9 @@ def test_optional_components_are_removed_when_excluded(tmp_path):
     assert design.deployment is None
     assert design.components["system"].status.value == "valid"
     assert design.services
+    master = master_design_document(design, [])
+    assert "cache are in place before broader rollout" not in master
+    assert "Budget, guardrails, and the threat model are in place before broader rollout." in master
 
     batch = dict(requested)
     batch.pop("excluded_components")
@@ -264,6 +269,10 @@ def test_master_design_lists_features_plan_and_sprints(tmp_path):
     assert "## 3. Sprints" in document
     assert "Sprint 1 — Foundation" in document
     assert "Sprint 2 — Core path" in document
+    assert (
+        "Budget, cache, guardrails, and the threat model are in place before broader rollout."
+        in document
+    )
     assert "not deployed" in document
     assert "F-01" in document
 
@@ -281,6 +290,9 @@ def test_hld_and_lld_documents_cover_tools_and_steps(tmp_path):
     assert "Cache authorization" in high
     assert "<!-- archai:diagram context -->" in high
     assert "<!-- archai:diagram architecture -->" in high
+    assert "Identity: Entra ID (assumed)" in high
+    assert "['westeurope'" not in high
+    assert "westeurope, northeurope" in high
     low = low_level_design_document(design, graph, [])
     assert "# Low-Level Design" in low
     assert "## 2. Interactive request" in low
@@ -290,6 +302,7 @@ def test_hld_and_lld_documents_cover_tools_and_steps(tmp_path):
     assert "**Failure**" not in low
     assert "| Failure |" in low
     assert "<!-- archai:diagram request -->" in low
+    assert "<!-- archai:diagram architecture -->" not in low
     assert "hld" not in design.components
     assert "lld" not in design.components
 
@@ -298,15 +311,15 @@ def test_hld_export_is_scoped(tmp_path):
     store, revision, _ = design_for(tmp_path)
     bundle, manifest = export_revision(store, revision, normalize_formats("all"), ["hld"])
     paths = {item.path for item in manifest.artifacts}
-    assert "documents/01-hld/High_Level_Design.md" in paths
-    assert "documents/01-hld/High_Level_Design.pdf" in paths
-    assert "documents/01-hld/diagrams/system.drawio" in paths
-    assert "documents/01-hld/diagrams/architecture.png" in paths
-    assert "documents/04-complete/Complete_AI_System_Design.md" not in paths
-    assert "documents/02-lld/Low_Level_Design.md" not in paths
+    assert "documents/High_Level_Design.md" in paths
+    assert "documents/High_Level_Design.pdf" in paths
+    assert "diagrams/hld.drawio" in paths
+    assert "diagrams/hld/architecture.png" in paths
+    assert "documents/Master_Design.md" not in paths
+    assert "documents/Low_Level_Design.md" not in paths
     assert "documents/components/Guardrails_Design.md" not in paths
     assert not (bundle / "diagrams/png").exists()
-    xml = (bundle / "documents/01-hld/diagrams/system.drawio").read_text()
+    xml = (bundle / "diagrams/hld.drawio").read_text()
     ET.fromstring(xml)
     assert 'name="System architecture"' in xml or 'id="architecture"' in xml
 
@@ -315,9 +328,9 @@ def test_lld_export_is_scoped(tmp_path):
     store, revision, _ = design_for(tmp_path)
     bundle, manifest = export_revision(store, revision, normalize_formats("core"), ["lld"])
     paths = {item.path for item in manifest.artifacts}
-    assert "documents/02-lld/Low_Level_Design.md" in paths
-    assert "documents/02-lld/diagrams/system.drawio" in paths
-    assert "documents/01-hld/High_Level_Design.md" not in paths
-    assert "documents/04-complete/Complete_AI_System_Design.md" not in paths
-    ET.fromstring((bundle / "documents/02-lld/diagrams/system.drawio").read_text())
-    assert len(list((bundle / "documents/02-lld/diagrams").glob("*.drawio"))) == 1
+    assert "documents/Low_Level_Design.md" in paths
+    assert "diagrams/lld.drawio" in paths
+    assert "documents/High_Level_Design.md" not in paths
+    assert "documents/Master_Design.md" not in paths
+    ET.fromstring((bundle / "diagrams/lld.drawio").read_text())
+    assert len(list((bundle / "diagrams").glob("*.drawio"))) == 1

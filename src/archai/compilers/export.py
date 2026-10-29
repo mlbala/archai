@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,7 +15,6 @@ from archai.compilers.hops import control_ownership
 from archai.compilers.lld import low_level_design_document, low_level_views
 from archai.compilers.master import master_design_document
 from archai.compilers.report import (
-    complete_document,
     component_document,
     diagram_document,
     document_name,
@@ -36,11 +36,10 @@ from archai.schemas.models import (
 
 CORE_FORMATS = {"md", "json", "yaml", "mmd", "drawio", "svg", "tf", "xml"}
 ALL_FORMATS = CORE_FORMATS | {"png", "pdf"}
-REVIEW_DIRS = {
-    "hld": "documents/01-hld",
-    "lld": "documents/02-lld",
-    "master": "documents/03-master",
-    "complete": "documents/04-complete",
+REVIEW_FILES = {
+    "hld": "documents/High_Level_Design",
+    "lld": "documents/Low_Level_Design",
+    "master": "documents/Master_Design",
 }
 DIAGRAM_VIEWS = (
     "system",
@@ -114,8 +113,8 @@ def export_revision(
     write_lld = full or "lld" in selected_scope
     diagnostics = revision_manifest.diagnostics
     bundle_id = new_bundle_id()
-    root = store.root / "exports" / f"{revision:04d}" / bundle_id
-    root.mkdir(parents=True, mode=0o700)
+    root = store.root
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
     artifacts: list[ArtifactRecord] = []
 
     def write(relative: str, content: str | bytes) -> None:
@@ -167,7 +166,6 @@ def export_revision(
     hld_markdown = high_level_design_document(design, graph, diagnostics) if write_hld else None
     lld_markdown = low_level_design_document(design, graph, diagnostics) if write_lld else None
     master_markdown = master_design_document(design, diagnostics) if full else None
-    complete_markdown = complete_document(design, graph, diagnostics) if full else None
 
     if "json" in formats:
         write("state/enterprise_design.json", json_bytes(design))
@@ -213,13 +211,11 @@ def export_revision(
         for name, content in sorted(documents.items()):
             write(f"{_markdown_folder(name)}/{name}", content)
         if hld_markdown is not None:
-            write(f"{REVIEW_DIRS['hld']}/High_Level_Design.md", hld_markdown)
+            write(f"{REVIEW_FILES['hld']}.md", hld_markdown)
         if lld_markdown is not None:
-            write(f"{REVIEW_DIRS['lld']}/Low_Level_Design.md", lld_markdown)
+            write(f"{REVIEW_FILES['lld']}.md", lld_markdown)
         if master_markdown is not None:
-            write(f"{REVIEW_DIRS['master']}/Master_Design.md", master_markdown)
-        if complete_markdown is not None:
-            write(f"{REVIEW_DIRS['complete']}/Complete_AI_System_Design.md", complete_markdown)
+            write(f"{REVIEW_FILES['master']}.md", master_markdown)
         if covers("api", "budget", "guard", "auth", "routing"):
             write("config/integration_contracts.md", _integration_contracts(design))
     if "yaml" in formats:
@@ -275,7 +271,7 @@ def export_revision(
             write,
             write_png,
             formats,
-            REVIEW_DIRS["hld"],
+            "hld",
             high_level_views(design, graph),
             graph,
             package_only,
@@ -285,7 +281,7 @@ def export_revision(
             write,
             write_png,
             formats,
-            REVIEW_DIRS["lld"],
+            "lld",
             low_level_views(design, graph),
             graph,
             package_only,
@@ -299,25 +295,11 @@ def export_revision(
                 (f"{_markdown_folder(name)}/{name.removesuffix('.md')}.pdf", content, title)
             )
         if hld_markdown is not None:
-            pdf_jobs.append(
-                (f"{REVIEW_DIRS['hld']}/High_Level_Design.pdf", hld_markdown, "High-Level Design")
-            )
+            pdf_jobs.append((f"{REVIEW_FILES['hld']}.pdf", hld_markdown, "High-Level Design"))
         if lld_markdown is not None:
-            pdf_jobs.append(
-                (f"{REVIEW_DIRS['lld']}/Low_Level_Design.pdf", lld_markdown, "Low-Level Design")
-            )
+            pdf_jobs.append((f"{REVIEW_FILES['lld']}.pdf", lld_markdown, "Low-Level Design"))
         if master_markdown is not None:
-            pdf_jobs.append(
-                (f"{REVIEW_DIRS['master']}/Master_Design.pdf", master_markdown, "Master Design")
-            )
-        if complete_markdown is not None:
-            pdf_jobs.append(
-                (
-                    f"{REVIEW_DIRS['complete']}/Complete_AI_System_Design.pdf",
-                    complete_markdown,
-                    "Complete AI System Design",
-                )
-            )
+            pdf_jobs.append((f"{REVIEW_FILES['master']}.pdf", master_markdown, "Master Design"))
         for relative, content, title in pdf_jobs:
             try:
                 _pdf(root / relative, content, title, design, scenes)
@@ -340,7 +322,10 @@ def export_revision(
         design_sha256=revision_manifest.design_sha256,
     )
     write("manifest.json", json_bytes(manifest))
-    store.write_export_metadata(bundle_id)
+    store.write_export_metadata("current")
+    stale = store.root / "exports"
+    if stale.is_dir():
+        shutil.rmtree(stale)
     return root, manifest
 
 
@@ -366,7 +351,7 @@ def _write_package_diagrams(
     write: Any,
     write_png: Any,
     formats: set[str],
-    folder: str,
+    package: str,
     views: list[View],
     graph: ArchitectureGraph,
     package_only: bool,
@@ -376,19 +361,19 @@ def _write_package_diagrams(
     if "drawio" in formats:
         source = drawio_document(_drawio_pages(views, graph))
         ET.fromstring(source)
-        write(f"{folder}/diagrams/system.drawio", source)
+        write(f"diagrams/{package}.drawio", source)
     if package_only:
         if "mmd" in formats:
             for item in views:
-                write(f"{folder}/diagrams/{item.key}.mmd", item.mermaid)
+                write(f"diagrams/{package}/{item.key}.mmd", item.mermaid)
         if "svg" in formats:
             for item in views:
                 source = to_svg(item.scene)
                 ET.fromstring(source)
-                write(f"{folder}/diagrams/{item.key}.svg", source)
+                write(f"diagrams/{package}/{item.key}.svg", source)
         if "png" in formats:
             for item in views:
-                write_png(f"{folder}/diagrams/{item.key}.png", item.scene)
+                write_png(f"diagrams/{package}/{item.key}.png", item.scene)
 
 
 def _bundle_readme(
@@ -412,30 +397,28 @@ def _bundle_readme(
         "",
     ]
     review = listed(
-        f"{REVIEW_DIRS['hld']}/High_Level_Design.pdf",
-        f"{REVIEW_DIRS['hld']}/High_Level_Design.md",
-        f"{REVIEW_DIRS['lld']}/Low_Level_Design.pdf",
-        f"{REVIEW_DIRS['lld']}/Low_Level_Design.md",
-        f"{REVIEW_DIRS['master']}/Master_Design.pdf",
-        f"{REVIEW_DIRS['master']}/Master_Design.md",
-        f"{REVIEW_DIRS['complete']}/Complete_AI_System_Design.pdf",
-        f"{REVIEW_DIRS['complete']}/Complete_AI_System_Design.md",
+        f"{REVIEW_FILES['hld']}.pdf",
+        f"{REVIEW_FILES['hld']}.md",
+        f"{REVIEW_FILES['lld']}.pdf",
+        f"{REVIEW_FILES['lld']}.md",
+        f"{REVIEW_FILES['master']}.pdf",
+        f"{REVIEW_FILES['master']}.md",
     )
     lines += review or ["- No review documents in this scoped export."]
     lines += [
         "",
         "## Folders",
         "",
-        "- `documents/01-hld/` — what the system is, tools, and the request path",
-        "- `documents/02-lld/` — one section per hop: owner, interface, payload, failure",
-        "- `documents/03-master/` — feature catalog, build order, and sprint slices",
-        "- `documents/04-complete/` — archive of every component; not the starting point",
+        "- `documents/High_Level_Design` — what the system is, tools, and the request path",
+        "- `documents/Low_Level_Design` — interactive hops in full; other paths as compact tables",
+        "- `documents/Master_Design` — feature catalog, build order, and sprint slices",
         "- `documents/requirements/` — product requirements",
         "- `documents/components/` — one document per designed component",
-        "- `diagrams/` — mermaid, svg, png, and draw.io files grouped by format",
+        "- `diagrams/` — mermaid, svg, png, and draw.io files, including `hld.drawio` and `lld.drawio`",
         "- `config/` — policies, gateway files, and custom-runtime contracts",
         "- `infrastructure/` and `workloads/` — generated IaC; ArchAI never applies it",
         "- `state/` — canonical JSON for this revision",
+        "- `sources/` — input files used for the design",
         "",
         f"Export scope: {', '.join(scope)}.",
         "",

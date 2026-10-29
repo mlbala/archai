@@ -720,12 +720,12 @@ def fallback_sequence(design: EnterpriseDesign) -> SequenceSpec | None:
 
 
 def async_sequence(design: EnterpriseDesign) -> SequenceSpec | None:
-    if design.queue_policy is None:
-        return None
-    worker = service_by_kind(design, "worker", "ingestion")
-    app = service_by_kind(design, "application", "orchestration")
     jobs = next((item for item in design.api_contracts if item.path == "/v1/jobs"), None)
-    call = f"{jobs.method} {jobs.path}" if jobs else "POST /v1/jobs"
+    worker = next((item for item in design.services if item.kind == "worker"), None)
+    if design.queue_policy is None or jobs is None or worker is None:
+        return None
+    app = service_by_kind(design, "application", "orchestration")
+    call = f"{jobs.method} {jobs.path}"
     broker = design.queue_policy.broker
     return SequenceSpec(
         "async",
@@ -736,7 +736,7 @@ def async_sequence(design: EnterpriseDesign) -> SequenceSpec | None:
             ("app", app.name if app else "Application", "application"),
             ("db", "State store (outbox)", "data"),
             ("q", broker, "queue"),
-            ("w", worker.name if worker else "Worker", "worker"),
+            ("w", worker.name, "worker"),
         ],
         [
             _step(
@@ -744,8 +744,8 @@ def async_sequence(design: EnterpriseDesign) -> SequenceSpec | None:
                 "app",
                 f"{call} (idempotency key)",
                 owner=_owner(app, "app"),
-                interface=_api_interface(jobs) if jobs else call,
-                payload=tuple(jobs.request_fields) if jobs else ("job_type", "idempotency_key"),
+                interface=_api_interface(jobs),
+                payload=tuple(jobs.request_fields),
                 failure="Reject duplicate idempotency keys; do not enqueue twice.",
             ),
             _step(
@@ -761,7 +761,7 @@ def async_sequence(design: EnterpriseDesign) -> SequenceSpec | None:
                 "202 Accepted + status URL",
                 dashed=True,
                 owner=_owner(app, "app"),
-                payload=tuple(jobs.response_fields) if jobs else ("job_id", "status_url"),
+                payload=tuple(jobs.response_fields),
             ),
             _step("db", "q", "Outbox relay publishes reference message", owner=broker),
             _step(

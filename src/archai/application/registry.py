@@ -175,7 +175,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         derived("doc"),
     ),
     "diagram": ComponentSpec("diagram", "Diagrams", None, True, ("Architecture_Diagrams.md",)),
-    "doc": ComponentSpec("doc", "Documentation", None, True, ("Complete_AI_System_Design.md",)),
+    "doc": ComponentSpec("doc", "Documentation", None, True, ("Master_Design.md",)),
 }
 
 DOCUMENT_PACKAGES: dict[str, ComponentSpec] = {

@@ -67,6 +67,26 @@ def cell(value: Any) -> str:
     return " ".join(str(value).split()).replace("|", "\\|")
 
 
+def identity_display(design: EnterpriseDesign) -> str:
+    policy = design.identity_policy
+    if policy is None:
+        return "not in scope"
+    if design.requirements.identity_provider:
+        return policy.idp
+    return f"{policy.idp} (assumed)"
+
+
+def join_en(items: Sequence[str]) -> str:
+    values = [item for item in items if item]
+    if not values:
+        return ""
+    if len(values) == 1:
+        return values[0]
+    if len(values) == 2:
+        return f"{values[0]} and {values[1]}"
+    return f"{', '.join(values[:-1])}, and {values[-1]}"
+
+
 def table(headers: Sequence[str], rows: Iterable[Sequence[Any]]) -> list[str]:
     materialized = [list(row) for row in rows]
     if not materialized:
@@ -1183,7 +1203,6 @@ def revision_documents(
     if "lld" in scope:
         documents["Low_Level_Design.md"] = low_level_design_document(design, graph, diagnostics)
     if "doc" in scope:
-        documents["Complete_AI_System_Design.md"] = complete_document(design, graph, diagnostics)
         documents["Master_Design.md"] = master_design_document(design, diagnostics)
     return documents
 
