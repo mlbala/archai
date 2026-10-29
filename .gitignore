@@ -72,6 +72,10 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# Local technical write-ups. Kept on disk, not in the repository.
+docs/ArchAI_Technical_Document.docx
+docs/ArchAI_Technical_Architecture.docx
+
 # PyBuilder
 .pybuilder/
 target/
