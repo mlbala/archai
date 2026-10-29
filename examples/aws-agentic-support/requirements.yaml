@@ -5,6 +5,7 @@ archetypes: [enterprise-rag, tool-using-agent]
 region: eu-west-1
 data_residency: [eu-west-1]
 tenant_isolation: single
+identity_provider: Amazon Cognito
 allowed_target_providers: [AWS Bedrock]
 tool_side_effects: forbidden
 avg_rps: 1

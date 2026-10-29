@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from archai.application.designer import has_rag, uses_tools
 from archai.application.registry import COMPONENTS
 from archai.compilers.report import (
     DISCLAIMER,
@@ -223,7 +224,7 @@ def _feature_intro(design: EnterpriseDesign) -> str:
         )
     return (
         "This revision has no separate functional-requirement list, so each feature is a "
-        "delivery slice of the business outcome, the workflows, and the controls in the design."
+        "product capability compiled from the outcome, sources, and controls on this design."
     )
 
 
@@ -253,7 +254,7 @@ def _synthesized_features(design: EnterpriseDesign) -> list[_Feature]:
     if design.identity_policy:
         drafts.append(
             (
-                f"Sign users in with {design.identity_policy.idp} and enforce application roles.",
+                f"Sign users in with {design.identity_policy.idp} before they can use the app.",
                 "must",
                 ("auth",),
                 "Sprint 1 — Foundation",
@@ -262,7 +263,9 @@ def _synthesized_features(design: EnterpriseDesign) -> list[_Feature]:
     if design.data_stores:
         drafts.append(
             (
-                f"Store tenant-scoped state in {len(design.data_stores)} named data stores.",
+                "Keep conversations and source documents in tenant-scoped stores."
+                if has_rag(req)
+                else "Keep conversation state in tenant-scoped stores.",
                 "must",
                 ("data",),
                 "Sprint 1 — Foundation",
@@ -271,16 +274,19 @@ def _synthesized_features(design: EnterpriseDesign) -> list[_Feature]:
     if design.deployment:
         drafts.append(
             (
-                f"Host the application on {design.deployment.name} in {design.deployment.region}.",
+                f"Run the application in {design.deployment.region} on {design.deployment.name}.",
                 "must",
                 ("infra",),
                 "Sprint 1 — Foundation",
             )
         )
-    for workflow in design.workflows:
+    tools = next((item for item in design.workflows if item.id == "workflow-tool-action"), None)
+    if tools:
         drafts.append(
             (
-                workflow.description or workflow.name,
+                "A human approves the exact tool action before it runs."
+                if tools.hitl_required
+                else "Run authorized tool actions with the caller's permissions.",
                 "must",
                 ("workflow", "system"),
                 "Sprint 2 — Core path",
@@ -295,6 +301,15 @@ def _synthesized_features(design: EnterpriseDesign) -> list[_Feature]:
                 "Sprint 2 — Core path",
             )
         )
+        if any(item.id == "workflow-ingestion" for item in design.workflows):
+            drafts.append(
+                (
+                    "Index new source documents with access controls so answers stay current.",
+                    "must",
+                    ("workflow", "rag"),
+                    "Sprint 2 — Core path",
+                )
+            )
     if design.budget_policy:
         drafts.append(
             (
@@ -308,7 +323,9 @@ def _synthesized_features(design: EnterpriseDesign) -> list[_Feature]:
     if design.guardrails:
         drafts.append(
             (
-                "Apply the guardrail controls on the request path before a tool or model call.",
+                "Stop unauthorized tool calls and unsafe answers before they leave the app."
+                if uses_tools(req)
+                else "Check answers for policy and sensitive data before they are shown.",
                 "must",
                 ("guard", "security"),
                 "Sprint 3 — Controls",
@@ -317,16 +334,19 @@ def _synthesized_features(design: EnterpriseDesign) -> list[_Feature]:
     if design.observability:
         drafts.append(
             (
-                "Trace each request across the gateway, admission, and model call.",
+                "Trace each user question from the gateway to the model call.",
                 "should",
                 ("observe",),
                 "Sprint 4 — Operate",
             )
         )
     if design.eval_plan:
+        fallback = any(alias.fallback_endpoint_ids for alias in design.model_aliases)
         drafts.append(
             (
-                "Evaluate every primary route before fallback traffic is enabled.",
+                "Evaluate the primary route before fallback traffic is enabled."
+                if fallback
+                else "Evaluate the primary chat route before production traffic.",
                 "should",
                 ("eval",),
                 "Sprint 4 — Operate",

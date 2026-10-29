@@ -361,6 +361,10 @@ def other_paths(design: EnterpriseDesign) -> list[PathWalk]:
     if design.rag_pipeline:
         walks.append(_ingestion_path(design))
     for workflow in design.workflows:
+        if workflow.id == "workflow-interactive":
+            continue
+        if workflow.id == "workflow-ingestion" and design.rag_pipeline:
+            continue
         walks.append(_workflow_path(design, workflow))
     fallback = fallback_sequence(design)
     if fallback:

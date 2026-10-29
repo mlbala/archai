@@ -68,12 +68,9 @@ def cell(value: Any) -> str:
 
 
 def identity_display(design: EnterpriseDesign) -> str:
-    policy = design.identity_policy
-    if policy is None:
+    if design.identity_policy is None:
         return "not in scope"
-    if design.requirements.identity_provider:
-        return policy.idp
-    return f"{policy.idp} (assumed)"
+    return design.identity_policy.idp
 
 
 def join_en(items: Sequence[str]) -> str:

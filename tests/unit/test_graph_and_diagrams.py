@@ -1,9 +1,6 @@
-import xml.etree.ElementTree as ET
-
 import pytest
 
-from archai.compilers.diagram import drawio, drawio_scene, svg
-from archai.compilers.scene import Box, Scene
+from archai.compilers.diagram import mermaid, safe_id
 from archai.schemas.models import ArchitectureGraph, Edge, Node
 
 
@@ -15,14 +12,13 @@ def test_graph_rejects_orphan_edges():
         )
 
 
-def test_xml_outputs_parse_and_escape():
-    graph = ArchitectureGraph(nodes=[Node(id="a", label="A & B", kind="x", lane="one")], edges=[])
-    ET.fromstring(drawio(graph))
-    ET.fromstring(svg(graph))
-    scene = Scene(
-        200,
-        80,
-        "Step",
-        [Box(10, 10, 80, 40, ["Gateway"], style="gateway")],
+def test_mermaid_escapes_labels_and_ids():
+    graph = ArchitectureGraph(
+        nodes=[Node(id="a-b", label='A "B"', kind="x", lane="one")],
+        edges=[Edge(id="e", source="a-b", target="a-b", label="reads|writes", kind="call")],
     )
-    ET.fromstring(drawio_scene(scene, "request", "Request path"))
+    text = mermaid(graph)
+    assert text.startswith("flowchart LR")
+    assert 'N_a_b["A #quot;B#quot;"]' in text
+    assert 'N_a_b -->|"reads/writes"| N_a_b' in text
+    assert safe_id("svc-app") == "N_svc_app"

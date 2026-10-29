@@ -1,6 +1,7 @@
 """Architecture views generated deterministically from canonical state.
 
-Every view has Mermaid source (embedded in Markdown) and a scene rendered to SVG/PNG/PDF.
+Every view has Mermaid source (embedded in Markdown and written under diagrams/mermaid/).
+PDF documents embed a matching layout drawing; SVG and PNG files are not generated.
 """
 
 from __future__ import annotations

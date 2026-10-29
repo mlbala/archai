@@ -39,9 +39,9 @@ the deterministic baseline with a warning; the component's "Designed by" label r
 - `application/merge.py` — proposal validation and Python-owned invariants.
 - `application/designer.py` — deterministic baseline and graph projection.
 - `compilers/` — documents (`report.py`, `master.py`, `hld.py`, `lld.py`), hop compiler
-  (`hops.py`), views and scenes (`views.py`, `scene.py`), PDF (`pdf.py`), Terraform and
-  Kubernetes (`terraform.py`), exports (`export.py`). High-level and low-level packages are
-  compiled documents, not design components.
+  (`hops.py`), Mermaid views (`views.py`, `diagram.py`), PDF drawings (`scene.py`, `pdf.py`),
+  Terraform and Kubernetes (`terraform.py`), exports (`export.py`). High-level and low-level
+  packages are compiled documents, not design components. Diagram files are Mermaid only.
 - `domain/scale.py` — the scale-up contract. The complete design document, the scale diagram,
   and the generated autoscaler minimums and maximums all use this one calculation.
 - `ui.py` — Rich interview prompts, live status board, summaries.

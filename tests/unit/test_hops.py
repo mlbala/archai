@@ -58,7 +58,8 @@ def test_request_hops_follow_primary_chat_contract(tmp_path):
     walks = {walk.key: walk for walk in other_paths(design)}
     assert "oauth-user" in walks
     assert walks["oauth-user"].hops
-    assert any(walk.key.startswith("workflow-") for walk in other_paths(design))
+    assert "workflow-interactive" not in walks
+    assert any(key.startswith("workflow-") for key in walks)
     labels = {label for label, _owner, _bound in trust_boundaries(design)}
     assert "Authentication and request limits" in labels
     assert "Cache authorization" in labels
@@ -122,23 +123,32 @@ def test_faq_omits_jobs_worker_and_async_path(tmp_path):
     assert "ingestion" in kinds
     assert "/v1/jobs" not in paths
     assert "/v1/chat" in paths
-    assert design.identity_policy is not None
-    assert design.identity_policy.idp == "Entra ID"
+    assert design.identity_policy is None
+    assert design.components["auth"].status.value == "not_applicable"
     assert design.cache_policy is None
     assert not any(walk.key == "async" for walk in other_paths(design))
+    assert not any(walk.key.startswith("oauth-") for walk in other_paths(design))
     assert not any(service.id == "svc-worker" for service in design.services)
     graph = build_graph(design)
     high = high_level_design_document(design, graph, [])
-    assert "Identity: Entra ID (assumed)" in high
+    assert "Identity: not in scope" in high
+    assert "Entra ID" not in high
     assert "['westeurope']" not in high
     assert "Region and residency: westeurope; westeurope" in high
     assert "tool approval" not in high
     low = low_level_design_document(design, graph, [])
     assert "<!-- archai:diagram architecture -->" not in low
     assert "<!-- archai:diagram request -->" in low
+    assert "<!-- archai:diagram oauth-user -->" not in low
+    assert "Interactive managed-model request" not in low
     assert "#### Step 1 —" not in low
     master = master_design_document(design, [])
-    assert "cache are in place" not in master
+    assert "Asynchronous outbox" not in master
+    assert "before a tool or model call" not in master
+    assert "before fallback traffic is enabled" not in master
+    assert "Index new source documents with access controls so answers stay current." in master
+    assert "Check answers for policy and sensitive data before they are shown." in master
+    assert "Evaluate the primary chat route before production traffic." in master
     assert "Budget, guardrails, and the threat model are in place before broader rollout." in master
 
 

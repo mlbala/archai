@@ -970,7 +970,6 @@ def doctor(check_provider: Annotated[bool, typer.Option("--check-provider")] = F
     checks.update(
         {
             "pdf_renderer": "reportlab available" if find_spec("reportlab") else "missing",
-            "png_renderer": "pillow available" if find_spec("PIL") else "missing",
             "terraform": shutil.which("terraform")
             or "not installed (IaC is generated, not validated)",
             "provider_network_probe": "not requested",

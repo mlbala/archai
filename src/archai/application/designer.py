@@ -115,7 +115,9 @@ def needs_queue(req: RequirementsSpec) -> bool:
 
 
 def auth_scheme(req: RequirementsSpec) -> str:
-    return f"OIDC bearer token ({req.identity_provider or 'Entra ID'})"
+    if req.identity_provider:
+        return f"OIDC bearer token ({req.identity_provider})"
+    return "not specified (identity not selected)"
 
 
 def cloud_of(profile: str) -> str:
@@ -223,6 +225,8 @@ def not_applicable_reason(component: str, req: RequirementsSpec) -> str | None:
         return _EXCLUSION_REASONS.get(component, "Excluded in the requirements")
     if component == "rag" and not has_rag(req):
         return "No retrieval archetype or knowledge sources in the requirements"
+    if component == "auth" and not req.identity_provider:
+        return "No identity provider selected in the requirements"
     return None
 
 
@@ -358,11 +362,7 @@ def _system(design: EnterpriseDesign, req: RequirementsSpec) -> None:
             owner="platform",
             technology=gateway,
             scaling="managed gateway units sized for peak RPS",
-            responsibilities=[
-                "Validate OIDC access tokens (issuer, audience, signature, expiry, tenant)",
-                "Per-principal request-rate limits and payload size limits",
-                "Correlation ID injection and external API versioning",
-            ],
+            responsibilities=_gateway_responsibilities(req),
             exposes=["/v1/*"],
             depends_on=["svc-app"],
         ),
@@ -519,6 +519,17 @@ def _system(design: EnterpriseDesign, req: RequirementsSpec) -> None:
         ["Single monolithic API", "Direct provider calls from the application"],
         "More deployable units; requires service-to-service identity and tracing.",
     )
+
+
+def _gateway_responsibilities(req: RequirementsSpec) -> list[str]:
+    items = []
+    if req.identity_provider:
+        items.append("Validate OIDC access tokens (issuer, audience, signature, expiry, tenant)")
+        items.append("Per-principal request-rate limits and payload size limits")
+    else:
+        items.append("Request-rate limits and payload size limits")
+    items.append("Correlation ID injection and external API versioning")
+    return items
 
 
 def _app_responsibilities(rag: bool, tools: bool, jobs: bool) -> list[str]:
@@ -1245,7 +1256,10 @@ def _resilience(design: EnterpriseDesign, req: RequirementsSpec) -> None:
 
 
 def _auth(design: EnterpriseDesign, req: RequirementsSpec) -> None:
-    idp = req.identity_provider or "Entra ID"
+    idp = req.identity_provider
+    if not idp:
+        design.identity_policy = None
+        return
     audience = f"api://{design.project}"
     flows = [
         OAuthFlow(

@@ -507,7 +507,11 @@ class ProposalMerger:
 
     def api(self, items: list[Any], proposal: BaseModel) -> None:
         del proposal
-        auth = f"OIDC bearer token ({self.req.identity_provider or 'Entra ID'})"
+        auth = (
+            f"OIDC bearer token ({self.req.identity_provider})"
+            if self.req.identity_provider
+            else "not specified (identity not selected)"
+        )
         default_service = next(
             (s.id for s in self.design.services if s.kind in {"application", "orchestration"}),
             None,
@@ -615,6 +619,10 @@ class ProposalMerger:
 
     def identity(self, item: Any, proposal: BaseModel) -> None:
         del proposal
+        provider = self.req.identity_provider
+        if not provider:
+            self.design.identity_policy = None
+            return
         flows = [
             OAuthFlow(
                 name=flow.name.strip() or flow.grant_type,
@@ -673,7 +681,7 @@ class ProposalMerger:
                     )
                 )
         self.design.identity_policy = IdentityPolicy(
-            idp=self.req.identity_provider or item.idp or baseline.idp,
+            idp=provider,
             tenant_mode=self.req.tenant_isolation,
             required_claims=_clean([*REQUIRED_CLAIMS, *item.extra_required_claims], 16),
             object_level_authorization=True,

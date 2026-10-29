@@ -62,7 +62,7 @@ def high_level_design_document(
         "This is the architecture review document for this revision. It answers what the "
         "system is, which tools it uses, and how a request moves. The low-level design walks "
         "each hop. The master design is the build order. Component documents live in "
-        "`documents/components/`. Open `diagrams/hld.drawio` in diagrams.net.",
+        "`documents/components/`. Diagrams are Mermaid; copies live in `diagrams/mermaid/`.",
         "",
         "## 1. Context",
         "",
