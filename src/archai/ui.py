@@ -299,7 +299,7 @@ def component_table(design: EnterpriseDesign, title: str = "Components") -> Tabl
     table.add_column("Document", style="dim")
     for name, spec in COMPONENTS.items():
         state = design.components.get(name)
-        if state is None or name == "doc":
+        if state is None or name in {"doc"}:
             continue
         style = STATUS_STYLE.get(state.status, "")
         table.add_row(
@@ -324,7 +324,11 @@ def print_summary(
     failed = [item for item in export.artifacts if item.status == "failed"]
     pdfs = [item.path for item in generated if item.path.endswith(".pdf")]
     docs = [item.path for item in generated if item.path.endswith(".md")]
-    diagrams = [item.path for item in generated if item.path.startswith("diagrams/")]
+    diagrams = [
+        item.path
+        for item in generated
+        if item.path.startswith("diagrams/") or "/diagrams/" in item.path
+    ]
     infra = [
         item.path for item in generated if item.path.startswith(("infrastructure/", "workloads/"))
     ]
@@ -356,14 +360,20 @@ def print_summary(
             "[bold]Architect models[/bold] none (deterministic baseline; run "
             "`archai setup` to enable the AI architect team)"
         )
-    main_pdf = next((p for p in pdfs if p.startswith("Complete_AI_System_Design")), None)
-    if main_pdf:
-        lines.append(f"[bold]Open[/bold] {bundle / main_pdf}")
-    elif pdfs:
+    review = [
+        ("Open", "High_Level_Design.pdf"),
+        ("Low-level design", "Low_Level_Design.pdf"),
+        ("Master design", "Master_Design.pdf"),
+        ("Complete archive", "Complete_AI_System_Design.pdf"),
+    ]
+    shown = False
+    for label, name in review:
+        path = next((item for item in pdfs if item.endswith(name)), None)
+        if path:
+            lines.append(f"[bold]{label}[/bold] {bundle / path}")
+            shown = True
+    if not shown and pdfs:
         lines.append(f"[bold]Open[/bold] {bundle / pdfs[0]}")
-    master_pdf = next((path for path in pdfs if path.startswith("master_design/")), None)
-    if master_pdf:
-        lines.append(f"[bold]Master design[/bold] {bundle / master_pdf}")
     console.print(
         Panel(
             "\n".join(lines),

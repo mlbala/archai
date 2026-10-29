@@ -12,9 +12,11 @@ get a response cache or user RBAC. Saying `cache excluded`, `I don't need RBAC`,
 routing, budget, data, and security.
 
 Every accepted design is an immutable revision. `arch auto` exports Markdown, PDF, diagrams,
-Terraform, Kubernetes manifests, gateway config, and policy files. It also writes
-`master_design/Master_Design.pdf`: the feature catalog, build order, and sprint slices for that
-same revision.
+Terraform, Kubernetes manifests, gateway config, and policy files. Open these three first:
+`documents/01-hld/High_Level_Design.pdf` (what the system is),
+`documents/02-lld/Low_Level_Design.pdf` (how each hop is implemented), and
+`documents/03-master/Master_Design.pdf` (features, build order, sprints).
+`documents/04-complete/Complete_AI_System_Design.pdf` is the component archive.
 
 The command is `arch`. `archai` is the same program. On macOS, `/usr/bin/arch` already exists,
 so use `archai` if your shell still finds the system command. ArchAI never deploys or applies
@@ -215,6 +217,19 @@ Baseline only, no model calls and no bill:
 archai auto -p sketch -f requirements.yaml --offline --non-interactive --formats core
 ```
 
+Named project, full export you can open. Files go under `output/<project>/`, not the repo root:
+
+```sh
+archai auto -p desk-assist -f examples/azure-enterprise-rag/requirements.yaml \
+  --non-interactive --formats all
+```
+
+The run summary prints the bundle path, for example
+`output/desk-assist/exports/0001/<timestamp>/`. Open
+`documents/01-hld/High_Level_Design.pdf` in that folder first. `archai status desk-assist`
+prints the latest export. `archai hld -p desk-assist` and `archai lld -p desk-assist`
+recompile only those packages from the saved revision and do not call a model.
+
 See the plan without writing files or calling a model:
 
 ```sh
@@ -266,9 +281,10 @@ The run ID is printed when a non-interactive design stops for missing answers, a
   required when the description does not decide them.
 - Read the review table and correct a wrong row before the design starts.
 - Put a second provider on the `verifier` role when you want a cross-check.
-- After the export, open `Complete_AI_System_Design.pdf` and
-  `master_design/Master_Design.pdf`. Lock a component you want to keep, then run `arch auto`
-  again; locked parts are not overwritten.
+- After the export, open `documents/01-hld/High_Level_Design.pdf`, then
+  `documents/02-lld/Low_Level_Design.pdf`, then `documents/03-master/Master_Design.pdf`.
+  `documents/04-complete/` is the component archive. Lock a component you want to keep, then
+  run `arch auto` again; locked parts are not overwritten.
 - Re-export with `archai export PROJECT` after you only need new files. That does not call a
   model.
 
@@ -283,40 +299,51 @@ output/<project>/
   revisions/0001/                 immutable design (state JSON, documents, manifest)
   runs/<run-id>/                  interview progress, so a paused run can resume
   exports/0001/<bundle>/
-    Complete_AI_System_Design.md
-    Complete_AI_System_Design.pdf
-    master_design/Master_Design.pdf
-    requirements/AI_Enterprise_PRD.md
-    documents/<Component>_Design.md
-    diagrams/<view>.mmd .svg .png
-    diagrams/architecture_diagram.drawio
+    README.md
+    manifest.json
+    documents/01-hld/             High_Level_Design.md .pdf and diagrams/system.drawio
+    documents/02-lld/             Low_Level_Design.md .pdf and diagrams/system.drawio
+    documents/03-master/          Master_Design.md .pdf
+    documents/04-complete/        Complete_AI_System_Design.md .pdf (archive)
+    documents/requirements/       AI_Enterprise_PRD.md .pdf
+    documents/components/         <Component>_Design.md .pdf
+    diagrams/mermaid|svg|png|drawio/
+    config/policies/              *.yaml
+    config/gateway/               litellm.yaml, apim_policies.xml
+    config/integration_contracts.md
     infrastructure/primary/*.tf
     workloads/kubernetes/*.yaml
-    litellm.yaml
-    apim_policies.xml
-    policies/*.yaml
-    integration_contracts.md
-    enterprise_design.json
-    architecture_graph.json
-    validation_report.json
-    manifest.json
+    state/                        enterprise_design.json, architecture_graph.json, ...
 ```
 
-Open `Complete_AI_System_Design.pdf` first. It is the architecture, each component, the
-infrastructure bill of materials, and the scale-up table. Replica minimums and maximums in that
-table are the same numbers written into the generated autoscalers. The ceiling is the peak
-worker estimate times 3, clamped to 3–30. It is a load-test starting point. Provider quotas
-still bound model throughput.
+Open `documents/01-hld/High_Level_Design.pdf` first: system context, tools, request path, and
+trust boundaries. Then `documents/02-lld/Low_Level_Design.pdf` for each hop (owner, interface,
+payload, failure). Then `documents/03-master/Master_Design.pdf` for the feature list, service
+build order, and four sprint slices (foundation, core path, controls, operate). Sprints are
+build slices, not dates.
 
-Open `master_design/Master_Design.pdf` for the feature list, the service build order, and four
-sprint slices (foundation, core path, controls, operate). Sprints are build slices, not dates.
+The request path is compiled from the saved API contracts, identity, retrieval, budget, and
+routes. It is not a canned chat script. An interactive app uses the streaming chat contract
+(`POST /v1/chat` in the packaged example). A scheduler-only batch app uses `POST /v1/jobs`.
+Identity hops and cache trust-boundary rows appear only when those parts are in the revision.
+Hop owner, interface, payload, and failure are set from that same state. High-level and
+low-level designs are document packages, not design components; they are not listed in
+component status.
+
+`documents/04-complete/Complete_AI_System_Design.pdf` is the archive of every component, the
+infrastructure bill of materials, and the scale-up table. It keeps context, architecture, and
+deployment. The hop walk stays in the high-level and low-level packages. Replica minimums and
+maximums in the scale-up table are the same numbers written into the generated autoscalers.
+The ceiling is the peak worker estimate times 3, clamped to 3–30. It is a load-test starting
+point. Provider quotas still bound model throughput. PNG and SVG live under `diagrams/`; each
+HLD/LLD folder keeps one `diagrams/system.drawio` file for diagrams.net.
 
 A component that was excluded is still listed. Its document says not applicable and why. Its
 policy file and, for cloud deployment, its Terraform root are omitted.
 
 `--formats all` (the default) writes Markdown, JSON, YAML, Mermaid, draw.io, SVG, Terraform,
 XML, PNG, and PDF. `--formats core` skips PNG and PDF. A full PDF export is the one that
-includes `master_design/Master_Design.pdf`.
+includes the complete, master, high-level, and low-level PDFs.
 
 Terraform is generated for `azure-aca`, `azure-aks`, and `aws-eks`. The `agnostic` profile and
 an excluded deployment produce no Terraform. Kubernetes manifests are generated for AKS and EKS.
@@ -369,8 +396,10 @@ Each command writes only that component, then the verifier for its role. `arch d
 | `archai cost -p PROJECT` | You want capacity and a cost scenario from the numbers you supplied. No model call. |
 | `archai diagram -p PROJECT --view deployment` | You want to redraw diagrams from the saved revision. No model call. |
 | `archai doc -p PROJECT` | You want to re-render documents from the saved revision. No model call. |
+| `archai hld -p PROJECT` | You want only the high-level design package (PDF, PNG, draw.io) from the saved revision. No model call. |
+| `archai lld -p PROJECT` | You want only the low-level design package (PDF, PNG, draw.io) from the saved revision. No model call. |
 
-Diagram views: `architecture`, `deployment`, `request`, `ingestion`, `guardrails`, `workflow`,
+Diagram views: `architecture`, `context`, `deployment`, `request`, `ingestion`, `guardrails`, `workflow`,
 `fallback`, `budget`, `recovery`, `oauth`, `data`, `async`, `scale`. `scaleup` is `scale`.
 `system` is `architecture`.
 
@@ -379,6 +408,8 @@ archai infra -p support --profile azure-aks --region westeurope
 archai auth -p support
 archai guard -p support --override examples/azure-enterprise-rag/guard-overrides.yaml
 archai diagram -p support --view scale
+archai hld -p support
+archai lld -p support
 archai doc -p support --scope guard,infra --formats md,pdf
 ```
 
@@ -425,7 +456,7 @@ interview saved.
 - Deployment IDs are `USER_SUPPLIED` placeholders. Quotas and prices are account inputs.
 - Catalogs are packaged snapshots. They are not a compliance claim.
 - Budget reservation, object-level authorization, approval binding, and provider eligibility
-  filtering are application work. They are listed in `integration_contracts.md`.
+  filtering are application work. They are listed in `config/integration_contracts.md`.
 
 See [limitations](docs/limitations.md) and [security](SECURITY.md).
 

@@ -19,7 +19,12 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from archai import __version__, config
-from archai.application.registry import COMPONENTS
+from archai.application.registry import (
+    COMPILED_COMPONENTS,
+    COMPONENTS,
+    DOCUMENT_PACKAGES,
+    review_scope,
+)
 from archai.application.service import (
     add_lock,
     auto_scope,
@@ -51,8 +56,9 @@ app = typer.Typer(
     name="arch",
     help="ArchAI: design managed-API enterprise AI systems without deploying them.\n\n"
     "Complete design: `arch auto` (interviews you on a terminal). Components: `arch system`, "
-    "`arch infra`, `arch auth`, ... Project operations: `status`, `inspect`, `doc`, `export`, "
-    "`validate`, `lock`, `edit`, `diff`, `simulate`, `setup`, `doctor`.",
+    "`arch infra`, `arch auth`, ... Compiled documents: `arch hld`, `arch lld`, `arch doc`. "
+    "Project operations: `status`, `inspect`, `export`, `validate`, `lock`, `edit`, `diff`, "
+    "`simulate`, `setup`, `doctor`.",
     no_args_is_help=False,
     rich_markup_mode="markdown",
 )
@@ -157,7 +163,10 @@ def root(
     table.add_column("Scope")
     table.add_row("arch auto", "Complete applicable design, validation, documents, and artifacts")
     for name, spec in COMPONENTS.items():
-        table.add_row(f"arch {name}", f"{spec.title} only")
+        suffix = " from the saved revision" if name in COMPILED_COMPONENTS else " only"
+        table.add_row(f"arch {name}", f"{spec.title}{suffix}")
+    for name, spec in DOCUMENT_PACKAGES.items():
+        table.add_row(f"arch {name}", f"{spec.title} from the saved revision")
     console.print(table)
     if not _is_interactive():
         console.print("Use `arch COMMAND --help`. Automatic mode never deploys infrastructure.")
@@ -181,6 +190,21 @@ def root(
         status()
     elif choice == "setup":
         setup()
+    elif choice in COMPILED_COMPONENTS or choice in DOCUMENT_PACKAGES:
+        project = Prompt.ask("Project name", console=console).strip()
+        if not project:
+            return
+        try:
+            store = ProjectStore(_output(None), project)
+            number = store.metadata().latest_revision
+            design = store.load_design(number)
+            selected_scope = review_scope(design.components) if choice == "doc" else [choice]
+            bundle, manifest = export_revision(
+                store, number, normalize_formats("all"), selected_scope
+            )
+            _print_result(store, number, bundle, manifest)
+        except Exception as exc:
+            _fail(exc)
     elif choice in COMPONENTS:
         project = Prompt.ask("Project name", console=console)
         _execute_generation(project=project, scope=[choice], files=[], interactive=True)
@@ -425,6 +449,23 @@ def component_entry(
                 override,
             ]
         )
+        if component in DOCUMENT_PACKAGES:
+            if has_inputs:
+                raise ValueError(
+                    f"`arch {component}` compiles a saved revision; do not pass requirements "
+                    "files. Run `arch auto` first, then this command."
+                )
+            if not store.project_file.exists() or store.metadata().latest_revision <= 0:
+                raise FileNotFoundError(
+                    f"No saved revision for {store.slug}. Run `arch auto -p {store.slug}` first, "
+                    f"then `arch {component}`."
+                )
+            number = base_revision or store.metadata().latest_revision
+            bundle, manifest = export_revision(
+                store, number, normalize_formats(formats), [component]
+            )
+            _print_result(store, number, bundle, manifest)
+            return
         if component in {"doc", "diagram"} and not has_inputs:
             number = base_revision or store.metadata().latest_revision
             design = store.load_design(number)
@@ -432,9 +473,9 @@ def component_entry(
                 selected_scope = (
                     [item.strip() for item in scope.split(",") if item.strip()]
                     if scope
-                    else [*design.components, "doc"]
+                    else review_scope(design.components)
                 )
-                unknown = set(selected_scope) - set(COMPONENTS)
+                unknown = set(selected_scope) - set(COMPONENTS) - set(DOCUMENT_PACKAGES)
                 if unknown:
                     raise ValueError(f"unknown document scope: {', '.join(sorted(unknown))}")
             else:
@@ -477,10 +518,16 @@ def component_entry(
 
 
 for _name, _spec in COMPONENTS.items():
-    app.command(
-        name=_name,
-        help=f"Design {_spec.title.lower()} only and create its standalone document.",
-    )(component_entry)
+    _help = (
+        f"Compile {_spec.title.lower()} from the saved revision."
+        if _name in COMPILED_COMPONENTS
+        else f"Design {_spec.title.lower()} only and create its standalone document."
+    )
+    app.command(name=_name, help=_help)(component_entry)
+for _name, _spec in DOCUMENT_PACKAGES.items():
+    app.command(name=_name, help=f"Compile {_spec.title.lower()} from the saved revision.")(
+        component_entry
+    )
 app.command(name="design", help="Alias of `arch system`; not a complete design.")(component_entry)
 
 
@@ -529,7 +576,11 @@ def auto(
     output_dir: OutputDir = None,
     formats: Annotated[str, typer.Option("--formats", help="all, core, or a list.")] = "all",
 ) -> None:
-    """Complete AI system design: interview, multi-agent design, validation, documents, PDF."""
+    """Complete AI system design: interview, multi-agent design, validation, and documents.
+
+    Writes the complete design, master design, high-level design, and low-level design
+    packages from the same revision.
+    """
     interactive = not non_interactive and not stdin and _is_interactive()
     try:
         _validate_provider(architect_provider)
@@ -850,7 +901,10 @@ def export_project(
         number = revision or store.metadata().latest_revision
         design = store.load_design(number)
         bundle, manifest = export_revision(
-            store, number, normalize_formats(formats), [*design.components, "doc"]
+            store,
+            number,
+            normalize_formats(formats),
+            review_scope(design.components),
         )
         _print_result(store, number, bundle, manifest)
     except BaseException as exc:

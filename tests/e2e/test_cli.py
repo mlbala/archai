@@ -1,3 +1,4 @@
+import json
 import re
 
 from typer.testing import CliRunner
@@ -24,6 +25,23 @@ def test_complete_create_validate_simulate_and_export(tmp_path, requirements_fil
     )
     assert result.exit_code == 0, result.output
     assert "Accepted revision 1" in result.output
+    bundle = max(
+        (tmp_path / "eu-support/exports/0001").iterdir(), key=lambda path: path.stat().st_mtime
+    )
+    hld = (bundle / "documents/01-hld/High_Level_Design.md").read_text()
+    lld = (bundle / "documents/02-lld/Low_Level_Design.md").read_text()
+    complete = (bundle / "documents/04-complete/Complete_AI_System_Design.md").read_text()
+    assert "POST /v1/chat" in hld
+    assert "POST /v1/chat with bearer token" not in hld
+    assert "Cache authorization" in hld
+    assert "`POST /v1/chat`" in lld
+    assert "### User sign-in" in lld
+    assert "<!-- archai:diagram request -->" not in complete
+    status = json.loads(
+        (tmp_path / "eu-support/revisions/0001/state/component_status.json").read_text()
+    )
+    assert "hld" not in status
+    assert "lld" not in status
     result = runner.invoke(
         app, ["validate", "eu-support", "--strict", "--output-dir", str(tmp_path)]
     )
@@ -142,6 +160,18 @@ def test_document_rerender_does_not_create_revision(tmp_path, requirements_file)
     )
     assert rendered.exit_code == 0, rendered.output
     assert not (tmp_path / "docs/revisions/0002").exists()
+    compiled = runner.invoke(
+        app,
+        ["hld", "-p", "docs", "--formats", "md,drawio", "--output-dir", str(tmp_path)],
+    )
+    assert compiled.exit_code == 0, compiled.output
+    assert not (tmp_path / "docs/revisions/0002").exists()
+    hld_bundle = max(
+        (tmp_path / "docs/exports/0001").iterdir(), key=lambda path: path.stat().st_mtime
+    )
+    assert (hld_bundle / "documents/01-hld/High_Level_Design.md").exists()
+    assert (hld_bundle / "documents/01-hld/diagrams/system.drawio").exists()
+    assert not (hld_bundle / "documents/04-complete").exists()
 
 
 def test_auto_without_project_explains_next_step():

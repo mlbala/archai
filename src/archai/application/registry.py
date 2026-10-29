@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 
@@ -13,6 +14,10 @@ class ComponentSpec:
     invalidates: tuple[str, ...] = ()
 
 
+def derived(*names: str) -> tuple[str, ...]:
+    return names
+
+
 COMPONENTS: dict[str, ComponentSpec] = {
     "requirements": ComponentSpec(
         "requirements",
@@ -20,7 +25,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Enterprise Requirements Architect",
         False,
         ("AI_Enterprise_PRD.md",),
-        (
+        derived(
             "system",
             "api",
             "routing",
@@ -47,7 +52,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Cloud, Data, and Resilience Architect",
         False,
         ("System_Design.md",),
-        ("diagram", "doc"),
+        derived("diagram", "doc"),
     ),
     "api": ComponentSpec(
         "api",
@@ -55,7 +60,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "API Management and AI Routing Architect",
         False,
         ("API_Design.md",),
-        ("infra", "security", "diagram", "doc"),
+        derived("infra", "security", "diagram", "doc"),
     ),
     "routing": ComponentSpec(
         "routing",
@@ -63,7 +68,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "API Management and AI Routing Architect",
         False,
         ("Routing_Design.md",),
-        ("budget", "cost", "diagram", "doc"),
+        derived("budget", "cost", "diagram", "doc"),
     ),
     "budget": ComponentSpec(
         "budget",
@@ -71,7 +76,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "API Management and AI Routing Architect",
         False,
         ("Budget_Design.md",),
-        ("cost", "doc"),
+        derived("cost", "doc"),
     ),
     "cache": ComponentSpec(
         "cache",
@@ -79,7 +84,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "API Management and AI Routing Architect",
         False,
         ("Cache_Design.md",),
-        ("cost", "doc"),
+        derived("cost", "doc"),
     ),
     "workflow": ComponentSpec(
         "workflow",
@@ -87,7 +92,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Cloud, Data, and Resilience Architect",
         False,
         ("Workflow_Design.md",),
-        ("security", "diagram", "doc"),
+        derived("security", "diagram", "doc"),
     ),
     "rag": ComponentSpec(
         "rag",
@@ -95,7 +100,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Cloud, Data, and Resilience Architect",
         False,
         ("RAG_Design.md",),
-        ("data", "security", "cost", "diagram", "doc"),
+        derived("data", "security", "cost", "diagram", "doc"),
     ),
     "data": ComponentSpec(
         "data",
@@ -103,7 +108,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Cloud, Data, and Resilience Architect",
         False,
         ("Data_Design.md",),
-        ("infra", "security", "diagram", "doc"),
+        derived("infra", "security", "diagram", "doc"),
     ),
     "infra": ComponentSpec(
         "infra",
@@ -111,7 +116,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Cloud, Data, and Resilience Architect",
         False,
         ("Infrastructure_Design.md",),
-        ("resilience", "cost", "diagram", "doc"),
+        derived("resilience", "cost", "diagram", "doc"),
     ),
     "resilience": ComponentSpec(
         "resilience",
@@ -119,7 +124,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Cloud, Data, and Resilience Architect",
         False,
         ("Resilience_Design.md",),
-        ("cost", "diagram", "doc"),
+        derived("cost", "diagram", "doc"),
     ),
     "auth": ComponentSpec(
         "auth",
@@ -127,7 +132,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Identity, Security, and Observability Architect",
         False,
         ("Identity_Design.md",),
-        ("guard", "security", "doc"),
+        derived("guard", "security", "doc"),
     ),
     "guard": ComponentSpec(
         "guard",
@@ -135,7 +140,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Identity, Security, and Observability Architect",
         False,
         ("Guardrails_Design.md",),
-        ("security", "eval", "doc"),
+        derived("security", "eval", "doc"),
     ),
     "security": ComponentSpec(
         "security",
@@ -143,7 +148,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Identity, Security, and Observability Architect",
         False,
         ("Security_Design.md",),
-        ("doc",),
+        derived("doc"),
     ),
     "observe": ComponentSpec(
         "observe",
@@ -151,7 +156,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Identity, Security, and Observability Architect",
         False,
         ("Observability_Design.md",),
-        ("doc",),
+        derived("doc"),
     ),
     "eval": ComponentSpec(
         "eval",
@@ -159,7 +164,7 @@ COMPONENTS: dict[str, ComponentSpec] = {
         "Identity, Security, and Observability Architect",
         False,
         ("Evaluation_Design.md",),
-        ("doc",),
+        derived("doc"),
     ),
     "cost": ComponentSpec(
         "cost",
@@ -167,18 +172,28 @@ COMPONENTS: dict[str, ComponentSpec] = {
         None,
         True,
         ("Cost_Design.md", "capacity_and_cost.json"),
-        ("doc",),
+        derived("doc"),
     ),
     "diagram": ComponentSpec("diagram", "Diagrams", None, True, ("Architecture_Diagrams.md",)),
     "doc": ComponentSpec("doc", "Documentation", None, True, ("Complete_AI_System_Design.md",)),
 }
 
-DESIGN_COMPONENTS = tuple(name for name in COMPONENTS if name not in {"diagram", "doc"})
+DOCUMENT_PACKAGES: dict[str, ComponentSpec] = {
+    "hld": ComponentSpec("hld", "High-Level Design", None, True, ("High_Level_Design.md",)),
+    "lld": ComponentSpec("lld", "Low-Level Design", None, True, ("Low_Level_Design.md",)),
+}
+
+COMPILED_COMPONENTS = frozenset({"diagram", "doc"})
+DESIGN_COMPONENTS = tuple(name for name in COMPONENTS if name not in COMPILED_COMPONENTS)
 AUTO_COMPONENTS = tuple(COMPONENTS)
 
 
+def review_scope(components: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys([*components, "doc", *DOCUMENT_PACKAGES]))
+
+
 def execution_plan(scope: list[str]) -> list[ComponentSpec]:
-    unknown = set(scope) - set(COMPONENTS)
+    unknown = set(scope) - set(COMPONENTS) - set(DOCUMENT_PACKAGES)
     if unknown:
         raise ValueError(f"unknown components: {', '.join(sorted(unknown))}")
     return [COMPONENTS[name] for name in COMPONENTS if name in scope]

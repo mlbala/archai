@@ -14,7 +14,12 @@ from archai import config
 from archai.application.designer import apply_scope, baseline_component, build_graph
 from archai.application.extraction import apply_quoted_suggestions, interview_suggestions
 from archai.application.merge import enforce_invariants
-from archai.application.registry import AUTO_COMPONENTS, COMPONENTS
+from archai.application.registry import (
+    AUTO_COMPONENTS,
+    COMPILED_COMPONENTS,
+    COMPONENTS,
+    DOCUMENT_PACKAGES,
+)
 from archai.application.supervisor import (
     ROLE_COMPONENTS,
     ROLE_NAMES,
@@ -107,19 +112,32 @@ def generation_plan(
 ) -> dict[str, Any]:
     existing = store.project_file.exists()
     roles = sorted(
-        {role for name in scope if (role := COMPONENTS[name].role) is not None}
+        {
+            role
+            for name in scope
+            if (spec := COMPONENTS.get(name)) is not None and (role := spec.role) is not None
+        }
         | {"Design Verifier and Compiler"}
     )
+    documents = [COMPONENTS[name].outputs[0] for name in scope if name in COMPONENTS]
+    if "doc" in scope:
+        documents.extend(spec.outputs[0] for spec in DOCUMENT_PACKAGES.values())
     return {
         "project": store.slug,
         "baseline_revision": store.metadata().latest_revision if existing else 0,
         "scope": scope,
         "roles": roles,
         "inputs": [str(path) for path in files],
-        "writes": [f"revision state for {name}" for name in scope],
-        "documents": [COMPONENTS[name].outputs[0] for name in scope],
+        "writes": [f"revision state for {name}" for name in scope if name in COMPONENTS],
+        "documents": documents,
         "invalidates": sorted(
-            {item for name in scope for item in COMPONENTS[name].invalidates if item not in scope}
+            {
+                item
+                for name in scope
+                if name in COMPONENTS
+                for item in COMPONENTS[name].invalidates
+                if item not in scope
+            }
         ),
         "formats": formats,
         "llm_calls": 0,
@@ -344,7 +362,7 @@ def run_generation(
             for name, state in design.components.items()
             if state.status in {ComponentStatus.valid, ComponentStatus.not_applicable}
         }
-        required = set(COMPONENTS) - {"diagram", "doc"}
+        required = set(COMPONENTS) - COMPILED_COMPONENTS
         complete = required <= valid_components
         manifest = RevisionManifest(
             project=store.slug,

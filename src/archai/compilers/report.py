@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from archai.application.registry import COMPONENTS
+from archai.application.registry import COMPILED_COMPONENTS, COMPONENTS, DOCUMENT_PACKAGES
 from archai.compilers.views import View, all_views, views_for
 from archai.domain.scale import replica_ceiling, scale_targets
 from archai.schemas.models import (
@@ -98,7 +98,7 @@ def source_label(source: str | None) -> str:
 
 
 def project_complete(design: EnterpriseDesign) -> bool:
-    required = set(COMPONENTS) - {"diagram", "doc"}
+    required = set(COMPONENTS) - COMPILED_COMPONENTS
     return required <= {
         name
         for name, state in design.components.items()
@@ -1000,20 +1000,22 @@ def complete_document(
         "",
         (design.prd.summary if design.prd and design.prd.summary else req.business_outcome),
         "",
-        "This is the end-to-end design for the application described in the requirements. "
-        "It contains the architecture diagrams, the microservice design, a chapter for each "
-        "component, the infrastructure design, and the scale-up architecture. Tables and "
-        "diagrams are compiled from the same canonical state.",
+        "This is the component archive for the application described in the requirements. "
+        "Start a review with the high-level design, then the low-level design, then the "
+        "master design. This file keeps every component chapter, the infrastructure design, "
+        "and the scale-up architecture. The request hop walk lives in the high-level and "
+        "low-level packages, not here. Tables and diagrams are compiled from the same "
+        "canonical state.",
         "",
     ]
     lines += bullets(_highlights(design))
     used: set[str] = set()
     lines += ["", "## Architecture overview", ""]
-    for key in ("architecture", "request", "deployment"):
+    for key in ("context", "architecture", "deployment"):
         if key in by_key:
             lines += diagram_block(by_key[key], "###")
             used.add(key)
-    used.add("scale")
+    used.update({"request", "scale"})
     lines += ["## Component status", ""]
     lines += table(
         ["Component", "Status", "Designed by", "Document"],
@@ -1025,7 +1027,8 @@ def complete_document(
                 f"`{document_name(name)}`",
             ]
             for name in COMPONENTS
-            if (state := design.components.get(name)) is not None and name != "doc"
+            if (state := design.components.get(name)) is not None
+            and name not in {"doc", *DOCUMENT_PACKAGES}
         ],
     )
     lines += ["", "---", "", "## 1. Product requirements", ""]
@@ -1033,7 +1036,10 @@ def complete_document(
     lines += [prd_body[2] if len(prd_body) > 2 else ""]
     number = 2
     for component in COMPONENTS:
-        if component in {"requirements", "doc", "diagram"} or component not in design.components:
+        if (
+            component in COMPILED_COMPONENTS | {"requirements"}
+            or component not in design.components
+        ):
             continue
         body = component_document(
             component,
@@ -1159,16 +1165,26 @@ def revision_documents(
     diagnostics: list[ValidationDiagnostic],
     scope: list[str],
 ) -> dict[str, str]:
+    from archai.compilers.hld import high_level_design_document
+    from archai.compilers.lld import low_level_design_document
+    from archai.compilers.master import master_design_document
+
     documents: dict[str, str] = {"AI_Enterprise_PRD.md": requirements_document(design)}
+    skip = {"doc", "requirements", *DOCUMENT_PACKAGES}
     for name in scope:
-        if name in COMPONENTS and name not in {"doc", "requirements"}:
+        if name in COMPONENTS and name not in skip:
             documents[document_name(name)] = (
                 diagram_document(design, graph)
                 if name == "diagram"
                 else component_document(name, design, graph, diagnostics)
             )
+    if "hld" in scope:
+        documents["High_Level_Design.md"] = high_level_design_document(design, graph, diagnostics)
+    if "lld" in scope:
+        documents["Low_Level_Design.md"] = low_level_design_document(design, graph, diagnostics)
     if "doc" in scope:
         documents["Complete_AI_System_Design.md"] = complete_document(design, graph, diagnostics)
+        documents["Master_Design.md"] = master_design_document(design, diagnostics)
     return documents
 
 

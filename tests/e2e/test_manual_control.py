@@ -36,7 +36,11 @@ def test_override_lock_and_auto_preserve_guardrails(tmp_path, requirements_file)
     assert completed.exit_code == 0, completed.output
     final_path = tmp_path / "controlled/revisions/0002/state/enterprise_design.json"
     assert json.loads(final_path.read_text())["guardrails"] == guarded
-    report = next((tmp_path / "controlled/exports/0002").glob("*/Complete_AI_System_Design.md"))
+    report = next(
+        (tmp_path / "controlled/exports/0002").glob(
+            "*/documents/04-complete/Complete_AI_System_Design.md"
+        )
+    )
     assert "exact refund arguments" in report.read_text()
 
 
