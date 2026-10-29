@@ -56,7 +56,7 @@ def low_level_design_document(
         "This is the implementation review document for this revision. Each step is a hop "
         "the owning service must implement. The high-level design has the system picture. "
         "The master design has the build order. Component documents live in "
-        "`documents/components/`. Open `diagrams/lld.drawio` in diagrams.net.",
+        "`documents/components/`. Diagrams are Mermaid; copies live in `diagrams/mermaid/`.",
         "",
         "## 1. Service index",
         "",
@@ -87,16 +87,12 @@ def low_level_design_document(
     lines += _hop_sections(hops, "###")
     lines += ["## 3. Other paths", ""]
     lines.append(
-        "Compact hop tables compiled from the same contracts, workflows, and policies as "
-        "the diagrams. Interactive hops above carry owner, interface, payload, and failure."
+        "Compact tables for paths that are not the interactive request. Owner, interface, "
+        "payload, and failure for the main hops are in section 2."
     )
     lines.append("")
-    used_views: set[str] = set()
     for walk in other_paths(design):
         lines += [f"### {walk.title}", ""]
-        if walk.view_key and walk.view_key in by_key:
-            lines += diagram_block(by_key[walk.view_key], "####")
-            used_views.add(walk.view_key)
         if walk.hops:
             lines += table(
                 ["Step", "From", "To", "Action", "Owner"],
@@ -104,7 +100,7 @@ def low_level_design_document(
             )
             lines.append("")
     for key in ("budget", "recovery"):
-        if key in by_key and key not in used_views:
+        if key in by_key:
             lines += diagram_block(by_key[key], "###")
     if design.api_contracts:
         lines += ["### API catalog", ""]

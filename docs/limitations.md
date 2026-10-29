@@ -2,6 +2,7 @@
 
 - Generated assets are reviewed design inputs. They are not deployed, planned, or validated
   against a real account, region, quota, or SKU.
+- Diagram files are Mermaid (`.mmd`) only. PNG, SVG, and draw.io are not exported.
 - Architect-model output varies between runs. It is validated and normalized, but a human
   architect must still review it. Deterministic re-export of a saved revision is reproducible.
 - Managed endpoint availability, deployment IDs, quotas, rate cards, licenses, and regions are

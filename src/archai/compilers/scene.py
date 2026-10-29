@@ -1,12 +1,9 @@
-"""Deterministic diagram scenes rendered to SVG, PNG (Pillow), and PDF (ReportLab drawings)."""
+"""Deterministic diagram scenes rendered as PDF drawings. Diagram files are Mermaid only."""
 
 from __future__ import annotations
 
-import html
-import io
 import textwrap
 from dataclasses import dataclass, field
-from itertools import pairwise
 from typing import Any, Literal
 
 FONT = "Helvetica"
@@ -112,7 +109,7 @@ GLYPHS = str.maketrans(
 
 
 def plain(text: str) -> str:
-    """Replace glyphs missing from the standard PDF/PNG fonts."""
+    """Replace glyphs missing from the standard PDF fonts."""
     return text.translate(GLYPHS)
 
 
@@ -133,70 +130,6 @@ def wrap(text: str, width_px: float, size: float, max_lines: int = 4) -> list[st
     return lines
 
 
-# ---------------------------------------------------------------- SVG
-
-
-def to_svg(scene: Scene) -> str:
-    out = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{scene.width:.0f}" '
-        f'height="{scene.height:.0f}" viewBox="0 0 {scene.width:.0f} {scene.height:.0f}" '
-        f'font-family="{FONT}, Arial, sans-serif">',
-        f"<title>{html.escape(scene.title)}</title>",
-        '<defs><marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" '
-        'orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8 z" '
-        f'fill="{PALETTE["line"]}"/></marker></defs>',
-        f'<rect width="100%" height="100%" fill="{PALETTE["canvas"]}"/>',
-    ]
-    labels: list[str] = []
-    for item in scene.items:
-        if isinstance(item, Box):
-            fill = item.fill or PALETTE.get(item.style, PALETTE["application"])
-            stroke = item.stroke or STROKES.get(item.style, PALETTE["line"])
-            dash = ' stroke-dasharray="6 4"' if item.dashed else ""
-            out.append(
-                f'<rect x="{item.x:.1f}" y="{item.y:.1f}" width="{item.w:.1f}" '
-                f'height="{item.h:.1f}" rx="{item.radius}" fill="{fill}" stroke="{stroke}" '
-                f'stroke-width="1.2"{dash}/>'
-            )
-            for index, (line, ly) in enumerate(_box_lines(item)):
-                weight = ' font-weight="bold"' if index == 0 and item.bold_first else ""
-                out.append(
-                    f'<text x="{item.x + item.w / 2:.1f}" y="{ly:.1f}" font-size="{item.font_size}"'
-                    f' text-anchor="middle" fill="{PALETTE["ink"]}"{weight}>'
-                    f"{html.escape(line)}</text>"
-                )
-        elif isinstance(item, Text):
-            weight = ' font-weight="bold"' if item.bold else ""
-            out.append(
-                f'<text x="{item.x:.1f}" y="{item.y:.1f}" font-size="{item.size}" '
-                f'text-anchor="{item.anchor}" fill="{item.color}"{weight}>'
-                f"{html.escape(item.text)}</text>"
-            )
-        else:
-            path = " ".join(
-                f"{'M' if index == 0 else 'L'} {x:.1f} {y:.1f}"
-                for index, (x, y) in enumerate(item.points)
-            )
-            dash = ' stroke-dasharray="5 4"' if item.dashed else ""
-            marker = ' marker-end="url(#arrow)"' if item.arrow else ""
-            out.append(
-                f'<path d="{path}" fill="none" stroke="{item.color}" '
-                f'stroke-width="{item.width}"{dash}{marker}/>'
-            )
-            if item.label and item.label_at:
-                lx, ly = item.label_at
-                width = text_width(item.label, 9) + 8
-                labels.append(
-                    f'<rect x="{lx - width / 2:.1f}" y="{ly - 9:.1f}" width="{width:.1f}" '
-                    f'height="13" rx="3" fill="#ffffff" opacity="0.92"/>'
-                    f'<text x="{lx:.1f}" y="{ly + 1:.1f}" font-size="9" text-anchor="middle" '
-                    f'fill="{PALETTE["muted"]}">{html.escape(item.label)}</text>'
-                )
-    out.extend(labels)
-    out.append("</svg>")
-    return "\n".join(out) + "\n"
-
-
 def _box_lines(box: Box) -> list[tuple[str, float]]:
     leading = box.font_size * 1.3
     if box.align == "top":
@@ -204,115 +137,6 @@ def _box_lines(box: Box) -> list[tuple[str, float]]:
     else:
         start = box.y + box.h / 2 - (len(box.lines) - 1) * leading / 2 + box.font_size * 0.35
     return [(line, start + index * leading) for index, line in enumerate(box.lines)]
-
-
-# ---------------------------------------------------------------- PNG
-
-
-def to_png(scene: Scene, scale: float = 2.0) -> bytes:
-    from PIL import Image, ImageDraw, ImageFont
-
-    width, height = int(scene.width * scale), int(scene.height * scale)
-    image = Image.new("RGB", (width, height), PALETTE["canvas"])
-    draw = ImageDraw.Draw(image)
-    fonts: dict[tuple[float, bool], Any] = {}
-
-    def font(size: float, bold: bool = False) -> Any:
-        key = (size, bold)
-        if key not in fonts:
-            fonts[key] = ImageFont.load_default(size=size * scale)
-        return fonts[key]
-
-    def s(value: float) -> float:
-        return value * scale
-
-    for item in scene.items:
-        if isinstance(item, Line):
-            points = [(s(x), s(y)) for x, y in item.points]
-            if item.dashed:
-                for (x1, y1), (x2, y2) in pairwise(points):
-                    _dashed(draw, x1, y1, x2, y2, item.color, max(1, int(s(item.width))))
-            else:
-                draw.line(points, fill=item.color, width=max(1, int(s(item.width))))
-            if item.arrow and len(points) >= 2:
-                _arrowhead(draw, points[-2], points[-1], item.color, s(8))
-    for item in scene.items:
-        if isinstance(item, Box):
-            fill = item.fill or PALETTE.get(item.style, PALETTE["application"])
-            stroke = item.stroke or STROKES.get(item.style, PALETTE["line"])
-            draw.rounded_rectangle(
-                (s(item.x), s(item.y), s(item.x + item.w), s(item.y + item.h)),
-                radius=s(item.radius),
-                fill=fill,
-                outline=stroke,
-                width=max(1, int(s(1.2))),
-            )
-            for index, (line, ly) in enumerate(_box_lines(item)):
-                draw.text(
-                    (s(item.x + item.w / 2), s(ly - item.font_size * 0.35)),
-                    plain(line),
-                    fill=PALETTE["ink"],
-                    font=font(item.font_size, index == 0 and item.bold_first),
-                    anchor="mm",
-                )
-        elif isinstance(item, Text):
-            anchor = {"start": "ls", "middle": "ms", "end": "rs"}[item.anchor]
-            draw.text(
-                (s(item.x), s(item.y)),
-                plain(item.text),
-                fill=item.color,
-                font=font(item.size),
-                anchor=anchor,
-            )
-    for item in scene.items:
-        if isinstance(item, Line) and item.label and item.label_at:
-            lx, ly = item.label_at
-            label_w = text_width(item.label, 9) + 8
-            draw.rectangle(
-                (s(lx - label_w / 2), s(ly - 9), s(lx + label_w / 2), s(ly + 4)), fill="#ffffff"
-            )
-            draw.text(
-                (s(lx), s(ly - 2.5)),
-                plain(item.label),
-                fill=PALETTE["muted"],
-                font=font(9),
-                anchor="mm",
-            )
-    output = io.BytesIO()
-    image.save(output, format="PNG", optimize=False)
-    return output.getvalue()
-
-
-def _dashed(draw: Any, x1: float, y1: float, x2: float, y2: float, color: str, width: int) -> None:
-    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-    if length == 0:
-        return
-    dash, gap = 10.0, 7.0
-    position = 0.0
-    while position < length:
-        end = min(position + dash, length)
-        draw.line(
-            (
-                x1 + (x2 - x1) * position / length,
-                y1 + (y2 - y1) * position / length,
-                x1 + (x2 - x1) * end / length,
-                y1 + (y2 - y1) * end / length,
-            ),
-            fill=color,
-            width=width,
-        )
-        position = end + gap
-
-
-def _arrowhead(
-    draw: Any, start: tuple[float, float], end: tuple[float, float], color: str, size: float
-) -> None:
-    (x1, y1), (x2, y2) = start, end
-    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 or 1
-    ux, uy = (x2 - x1) / length, (y2 - y1) / length
-    left = (x2 - ux * size - uy * size * 0.45, y2 - uy * size + ux * size * 0.45)
-    right = (x2 - ux * size + uy * size * 0.45, y2 - uy * size - ux * size * 0.45)
-    draw.polygon([end, left, right], fill=color)
 
 
 # ---------------------------------------------------------------- ReportLab

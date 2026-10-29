@@ -162,13 +162,16 @@ def test_document_rerender_does_not_create_revision(tmp_path, requirements_file)
     assert not (tmp_path / "docs/revisions/0002").exists()
     compiled = runner.invoke(
         app,
-        ["hld", "-p", "docs", "--formats", "md,drawio", "--output-dir", str(tmp_path)],
+        ["hld", "-p", "docs", "--formats", "md,mmd", "--output-dir", str(tmp_path)],
     )
     assert compiled.exit_code == 0, compiled.output
     assert not (tmp_path / "docs/revisions/0002").exists()
     project = tmp_path / "docs"
     assert (project / "documents/High_Level_Design.md").exists()
-    assert (project / "diagrams/hld.drawio").exists()
+    assert (project / "diagrams/mermaid/architecture.mmd").exists()
+    assert not (project / "diagrams/hld.drawio").exists()
+    assert list((project / "diagrams").rglob("*.png")) == []
+    assert list((project / "diagrams").rglob("*.svg")) == []
     assert not (project / "documents/Complete_AI_System_Design.md").exists()
     assert not (project / "exports").exists()
 

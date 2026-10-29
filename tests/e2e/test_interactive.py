@@ -53,7 +53,9 @@ def test_auto_interviews_for_missing_answers_then_designs_and_exports(tmp_path, 
     assert (project / "documents/High_Level_Design.pdf").exists()
     assert (project / "documents/Low_Level_Design.pdf").exists()
     assert not (project / "documents/Complete_AI_System_Design.pdf").exists()
-    assert (project / "diagrams/png/oauth-user.png").read_bytes().startswith(b"\x89PNG")
+    assert "flowchart" in (project / "diagrams/mermaid/architecture.mmd").read_text()
+    assert list((project / "diagrams").rglob("*.png")) == []
+    assert list((project / "diagrams").rglob("*.svg")) == []
     status = runner.invoke(app, ["status", "guided", "--output-dir", str(tmp_path / "out")])
     assert status.exit_code == 0, status.output
     assert "Completeness: complete" in status.output

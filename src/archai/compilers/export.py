@@ -9,7 +9,6 @@ from typing import Any
 import yaml
 
 from archai.application.registry import AUTO_COMPONENTS, COMPONENTS, DOCUMENT_PACKAGES
-from archai.compilers.diagram import drawio, drawio_document, drawio_scene
 from archai.compilers.hld import high_level_design_document, high_level_views
 from archai.compilers.hops import control_ownership
 from archai.compilers.lld import low_level_design_document, low_level_views
@@ -22,20 +21,18 @@ from archai.compilers.report import (
     requirements_document,
     source_label,
 )
-from archai.compilers.scene import Scene, to_png, to_svg
 from archai.compilers.terraform import apim_policy_xml, compile_infrastructure
 from archai.compilers.views import View, all_views, views_for
 from archai.ingestion import sha256_bytes
 from archai.persistence.store import ProjectStore, json_bytes, new_bundle_id
 from archai.schemas.models import (
-    ArchitectureGraph,
     ArtifactRecord,
     EnterpriseDesign,
     ExportBundleManifest,
 )
 
-CORE_FORMATS = {"md", "json", "yaml", "mmd", "drawio", "svg", "tf", "xml"}
-ALL_FORMATS = CORE_FORMATS | {"png", "pdf"}
+CORE_FORMATS = {"md", "json", "yaml", "mmd", "tf", "xml"}
+ALL_FORMATS = CORE_FORMATS | {"pdf"}
 REVIEW_FILES = {
     "hld": "documents/High_Level_Design",
     "lld": "documents/Low_Level_Design",
@@ -115,6 +112,7 @@ def export_revision(
     bundle_id = new_bundle_id()
     root = store.root
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _remove_stale_diagrams(root)
     artifacts: list[ArtifactRecord] = []
 
     def write(relative: str, content: str | bytes) -> None:
@@ -131,12 +129,6 @@ def export_revision(
 
     def covers(*components: str) -> bool:
         return full or any(name in selected_scope for name in components)
-
-    def write_png(relative: str, scene: Scene) -> None:
-        try:
-            write(relative, to_png(scene))
-        except (ImportError, OSError) as exc:
-            record(relative, "failed", f"optional Pillow renderer unavailable: {exc}")
 
     views = all_views(design, graph)
     selected_views = select_views(views, selected_scope, view)
@@ -236,23 +228,9 @@ def export_revision(
                 "APIM is not selected for this profile",
             )
     shared_diagrams = selected_views if not package_only else []
-    svg_sources = {item.key: to_svg(item.scene) for item in shared_diagrams}
     if "mmd" in formats:
         for item in shared_diagrams:
             write(f"diagrams/mermaid/{item.key}.mmd", item.mermaid)
-    if "svg" in formats:
-        for key, source in svg_sources.items():
-            ET.fromstring(source)
-            write(f"diagrams/svg/{key}.svg", source)
-    if "drawio" in formats:
-        for item in shared_diagrams:
-            source = (
-                drawio(graph)
-                if item.key == "architecture"
-                else drawio_scene(item.scene, item.key, item.title)
-            )
-            ET.fromstring(source)
-            write(f"diagrams/drawio/{item.key}.drawio", source)
     if "tf" in formats and covers("infra") and design.deployment:
         if design.requirements.profile == "agnostic":
             record(
@@ -263,29 +241,10 @@ def export_revision(
         else:
             for relative, content in sorted(compile_infrastructure(design).items()):
                 write(relative, content)
-    if "png" in formats:
-        for item in shared_diagrams:
-            write_png(f"diagrams/png/{item.key}.png", item.scene)
     if write_hld:
-        _write_package_diagrams(
-            write,
-            write_png,
-            formats,
-            "hld",
-            high_level_views(design, graph),
-            graph,
-            package_only,
-        )
+        _write_package_mermaid(write, formats, high_level_views(design, graph), package_only)
     if write_lld:
-        _write_package_diagrams(
-            write,
-            write_png,
-            formats,
-            "lld",
-            low_level_views(design, graph),
-            graph,
-            package_only,
-        )
+        _write_package_mermaid(write, formats, low_level_views(design, graph), package_only)
     if "pdf" in formats:
         scenes = {item.key: item.scene for item in views}
         pdf_jobs: list[tuple[str, str, str]] = []
@@ -335,45 +294,29 @@ def _markdown_folder(name: str) -> str:
     return "documents/components"
 
 
-def _drawio_pages(
-    views: list[View], graph: ArchitectureGraph
-) -> list[tuple[str, str, ArchitectureGraph | Scene]]:
-    pages: list[tuple[str, str, ArchitectureGraph | Scene]] = []
-    for item in views:
-        if item.key == "architecture":
-            pages.append((item.key, item.title, graph))
-        else:
-            pages.append((item.key, item.title, item.scene))
-    return pages
-
-
-def _write_package_diagrams(
+def _write_package_mermaid(
     write: Any,
-    write_png: Any,
     formats: set[str],
-    package: str,
     views: list[View],
-    graph: ArchitectureGraph,
     package_only: bool,
 ) -> None:
-    if not views:
+    if not package_only or "mmd" not in formats:
         return
-    if "drawio" in formats:
-        source = drawio_document(_drawio_pages(views, graph))
-        ET.fromstring(source)
-        write(f"diagrams/{package}.drawio", source)
-    if package_only:
-        if "mmd" in formats:
-            for item in views:
-                write(f"diagrams/{package}/{item.key}.mmd", item.mermaid)
-        if "svg" in formats:
-            for item in views:
-                source = to_svg(item.scene)
-                ET.fromstring(source)
-                write(f"diagrams/{package}/{item.key}.svg", source)
-        if "png" in formats:
-            for item in views:
-                write_png(f"diagrams/{package}/{item.key}.png", item.scene)
+    for item in views:
+        write(f"diagrams/mermaid/{item.key}.mmd", item.mermaid)
+
+
+def _remove_stale_diagrams(root: Path) -> None:
+    diagrams = root / "diagrams"
+    if not diagrams.is_dir():
+        return
+    for name in ("drawio", "svg", "png", "hld", "lld"):
+        path = diagrams / name
+        if path.is_dir():
+            shutil.rmtree(path)
+    for pattern in ("*.drawio", "*.png", "*.svg"):
+        for path in diagrams.glob(pattern):
+            path.unlink()
 
 
 def _bundle_readme(
@@ -414,7 +357,7 @@ def _bundle_readme(
         "- `documents/Master_Design` — feature catalog, build order, and sprint slices",
         "- `documents/requirements/` — product requirements",
         "- `documents/components/` — one document per designed component",
-        "- `diagrams/` — mermaid, svg, png, and draw.io files, including `hld.drawio` and `lld.drawio`",
+        "- `diagrams/mermaid/` — source diagrams; the same charts are inlined in the Markdown",
         "- `config/` — policies, gateway files, and custom-runtime contracts",
         "- `infrastructure/` and `workloads/` — generated IaC; ArchAI never applies it",
         "- `state/` — canonical JSON for this revision",

@@ -306,7 +306,7 @@ output/<project>/
     Master_Design.md .pdf
     requirements/               AI_Enterprise_PRD.md .pdf
     components/                 <Component>_Design.md .pdf
-  diagrams/                     hld.drawio, lld.drawio, mermaid/, svg/, png/, drawio/
+  diagrams/mermaid/             architecture, request, and other charts (.mmd)
   config/                       policies/, gateway/, integration_contracts.md
   infrastructure/primary/*.tf
   workloads/kubernetes/*.yaml
@@ -329,27 +329,33 @@ component is in `documents/components/` if you need a single policy or service c
 The request path is compiled from the saved API contracts, identity, retrieval, budget, and
 routes. It is not a canned chat script. An interactive app uses the streaming chat contract
 (`POST /v1/chat` in the packaged example). A scheduler-only batch app uses `POST /v1/jobs`.
-A FAQ or read-only RAG app does not include a jobs worker or `/v1/jobs`. Identity hops and
-cache trust-boundary rows appear only when those parts are in the revision. High-level design
-prints residency as a region list and names the identity provider from the identity policy
-(Entra ID is labeled assumed when the provider was not selected). Sprint goals name only
-components on the revision, so an excluded cache is not listed in Sprint 3. Low-level design
-repeats the request diagram, not the architecture diagram; other paths are compact hop
-tables. Hop owner, interface, payload, and failure are set from that same state. High-level
-and low-level designs are document packages, not design components; they are not listed in
-component status.
+A FAQ or read-only RAG app does not include a jobs worker or `/v1/jobs`. Identity hops appear
+only when an identity provider is selected; otherwise identity is out of scope and is not
+assumed. Cache trust-boundary rows appear only when cache is in the revision. High-level
+design prints residency as a region list and names the identity provider from the identity
+policy. Sprint goals name only components on the revision, so an excluded cache is not listed
+in Sprint 3. Master features are product capabilities, not a restatement of every control.
+Low-level design repeats the request diagram, not the architecture diagram; other paths are
+compact tables without a second copy of the request or ingestion diagram. Hop owner,
+interface, payload, and failure are set from that same state. High-level and low-level
+designs are document packages, not design components; they are not listed in component
+status.
 
 Replica minimums and maximums in the scale-up table are the same numbers written into the
 generated autoscalers. The ceiling is the peak worker estimate times 3, clamped to 3–30. It is
-a load-test starting point. Provider quotas still bound model throughput. PNG and SVG live
-under `diagrams/`. Open `diagrams/hld.drawio` and `diagrams/lld.drawio` in diagrams.net.
+a load-test starting point. Provider quotas still bound model throughput.
+
+Diagrams are Mermaid only. Each chart is inlined in the Markdown documents and copied under
+`diagrams/mermaid/` as `.mmd`. PNG, SVG, and draw.io files are not generated. `archai diagram`
+rewrites those Mermaid files from the saved revision. Review PDFs still embed a layout drawing
+of the same view; that is not a PNG or SVG export.
 
 A component that was excluded is still listed. Its document says not applicable and why. Its
 policy file and, for cloud deployment, its Terraform root are omitted.
 
-`--formats all` (the default) writes Markdown, JSON, YAML, Mermaid, draw.io, SVG, Terraform,
-XML, PNG, and PDF. `--formats core` skips PNG and PDF. A full PDF export is the one that
-includes the high-level, low-level, and master PDFs.
+`--formats all` (the default) writes Markdown, JSON, YAML, Mermaid, Terraform, XML, and PDF.
+`--formats core` skips PDF. A full PDF export is the one that includes the high-level,
+low-level, and master PDFs.
 
 Terraform is generated for `azure-aca`, `azure-aks`, and `aws-eks`. The `agnostic` profile and
 an excluded deployment produce no Terraform. Kubernetes manifests are generated for AKS and EKS.
@@ -367,7 +373,7 @@ Nothing here is applied.
 | Command | Use it when |
 | --- | --- |
 | `archai setup` | You need to choose a provider, model, and API key. |
-| `archai doctor` | You want a secret-free check of Python, keys, and renderers. Add `--check-provider` to probe the network. |
+| `archai doctor` | You want a secret-free check of Python, keys, and the PDF renderer. Add `--check-provider` to probe the network. |
 | `archai model show` | You want to see which model each role uses and whether its key is set. |
 | `archai model list [PROVIDER] [--remote]` | You want suggested models, or the models your key can call. |
 | `archai model use PROVIDER [MODEL] [--key] [--role ROLE] [--global]` | You want to switch provider or model, or set one role. |
@@ -400,10 +406,10 @@ Each command writes only that component, then the verifier for its role. `arch d
 | `archai observe -p PROJECT` | You want traces, metrics, and logs. |
 | `archai eval -p PROJECT` | You want the evaluation plan for primary and fallback routes. |
 | `archai cost -p PROJECT` | You want capacity and a cost scenario from the numbers you supplied. No model call. |
-| `archai diagram -p PROJECT --view deployment` | You want to redraw diagrams from the saved revision. No model call. |
+| `archai diagram -p PROJECT --view deployment` | You want to redraw Mermaid diagrams from the saved revision. No model call. |
 | `archai doc -p PROJECT` | You want to re-render documents from the saved revision. No model call. |
-| `archai hld -p PROJECT` | You want only the high-level design package (PDF, PNG, draw.io) from the saved revision. No model call. |
-| `archai lld -p PROJECT` | You want only the low-level design package (PDF, PNG, draw.io) from the saved revision. No model call. |
+| `archai hld -p PROJECT` | You want only the high-level design package (Markdown, Mermaid, PDF) from the saved revision. No model call. |
+| `archai lld -p PROJECT` | You want only the low-level design package (Markdown, Mermaid, PDF) from the saved revision. No model call. |
 
 Diagram views: `architecture`, `context`, `deployment`, `request`, `ingestion`, `guardrails`, `workflow`,
 `fallback`, `budget`, `recovery`, `oauth`, `data`, `async`, `scale`. `scaleup` is `scale`.

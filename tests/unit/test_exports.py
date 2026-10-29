@@ -14,7 +14,7 @@ from archai.compilers.hld import high_level_design_document
 from archai.compilers.lld import low_level_design_document
 from archai.compilers.master import master_design_document
 from archai.compilers.report import complete_document, component_document
-from archai.compilers.scene import to_png, to_svg
+from archai.compilers.scene import to_drawing
 from archai.compilers.terraform import apim_policy_xml, compile_infrastructure
 from archai.compilers.views import all_views
 from archai.domain.scale import minimum_replicas, replica_ceiling, scale_targets
@@ -125,13 +125,13 @@ def test_apim_policy_and_views_are_valid_and_renderable(tmp_path):
         "scale",
     } <= keys
     for view in views:
-        ET.fromstring(to_svg(view.scene))
         assert view.mermaid.split("\n", 1)[0] in {
             "flowchart LR",
             "sequenceDiagram",
             "stateDiagram-v2",
         }
-    assert to_png(views[0].scene).startswith(b"\x89PNG")
+    drawing = to_drawing(views[0].scene, 400, 300)
+    assert drawing.width > 0 and drawing.height > 0
 
 
 def test_documents_are_substantive(tmp_path):
@@ -275,6 +275,10 @@ def test_master_design_lists_features_plan_and_sprints(tmp_path):
     )
     assert "not deployed" in document
     assert "F-01" in document
+    assert "A human approves the exact tool action before it runs." in document
+    assert "before a tool or model call" not in document
+    assert "Asynchronous outbox" not in document
+    assert "Evaluate the primary route before fallback traffic is enabled." in document
 
 
 def test_hld_and_lld_documents_cover_tools_and_steps(tmp_path):
@@ -290,7 +294,8 @@ def test_hld_and_lld_documents_cover_tools_and_steps(tmp_path):
     assert "Cache authorization" in high
     assert "<!-- archai:diagram context -->" in high
     assert "<!-- archai:diagram architecture -->" in high
-    assert "Identity: Entra ID (assumed)" in high
+    assert "Identity: Entra ID" in high
+    assert "Identity: Entra ID (assumed)" not in high
     assert "['westeurope'" not in high
     assert "westeurope, northeurope" in high
     low = low_level_design_document(design, graph, [])
@@ -303,6 +308,8 @@ def test_hld_and_lld_documents_cover_tools_and_steps(tmp_path):
     assert "| Failure |" in low
     assert "<!-- archai:diagram request -->" in low
     assert "<!-- archai:diagram architecture -->" not in low
+    assert "<!-- archai:diagram oauth-user -->" not in low
+    assert "Interactive managed-model request" not in low
     assert "hld" not in design.components
     assert "lld" not in design.components
 
@@ -313,15 +320,19 @@ def test_hld_export_is_scoped(tmp_path):
     paths = {item.path for item in manifest.artifacts}
     assert "documents/High_Level_Design.md" in paths
     assert "documents/High_Level_Design.pdf" in paths
-    assert "diagrams/hld.drawio" in paths
-    assert "diagrams/hld/architecture.png" in paths
+    assert "diagrams/mermaid/architecture.mmd" in paths
+    assert "diagrams/hld.drawio" not in paths
     assert "documents/Master_Design.md" not in paths
     assert "documents/Low_Level_Design.md" not in paths
     assert "documents/components/Guardrails_Design.md" not in paths
     assert not (bundle / "diagrams/png").exists()
-    xml = (bundle / "diagrams/hld.drawio").read_text()
-    ET.fromstring(xml)
-    assert 'name="System architecture"' in xml or 'id="architecture"' in xml
+    assert not (bundle / "diagrams/svg").exists()
+    assert not (bundle / "diagrams/drawio").exists()
+    diagram_files = [path for path in (bundle / "diagrams").rglob("*") if path.is_file()]
+    assert diagram_files
+    assert {path.suffix for path in diagram_files} == {".mmd"}
+    mermaid = (bundle / "diagrams/mermaid/architecture.mmd").read_text()
+    assert mermaid.startswith("flowchart LR")
 
 
 def test_lld_export_is_scoped(tmp_path):
@@ -329,8 +340,10 @@ def test_lld_export_is_scoped(tmp_path):
     bundle, manifest = export_revision(store, revision, normalize_formats("core"), ["lld"])
     paths = {item.path for item in manifest.artifacts}
     assert "documents/Low_Level_Design.md" in paths
-    assert "diagrams/lld.drawio" in paths
+    assert "diagrams/mermaid/request.mmd" in paths
+    assert "diagrams/lld.drawio" not in paths
     assert "documents/High_Level_Design.md" not in paths
     assert "documents/Master_Design.md" not in paths
-    ET.fromstring((bundle / "diagrams/lld.drawio").read_text())
-    assert len(list((bundle / "diagrams").glob("*.drawio"))) == 1
+    assert list((bundle / "diagrams").glob("*.drawio")) == []
+    assert list((bundle / "diagrams").rglob("*.png")) == []
+    assert list((bundle / "diagrams").rglob("*.svg")) == []
