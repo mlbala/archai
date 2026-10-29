@@ -341,7 +341,7 @@ def print_summary(
             if revision_manifest.project_complete
             else "[yellow]partial design[/yellow]"
         ),
-        f"[bold]Bundle[/bold] {bundle}",
+        f"[bold]Folder[/bold] {bundle}",
         f"[bold]Artifacts[/bold] {len(docs)} documents · {len(pdfs)} PDFs · "
         f"{len(diagrams)} diagram files · {len(infra)} IaC/workload files"
         + (f" · [yellow]{len(failed)} failed[/yellow]" if failed else ""),
@@ -364,7 +364,6 @@ def print_summary(
         ("Open", "High_Level_Design.pdf"),
         ("Low-level design", "Low_Level_Design.pdf"),
         ("Master design", "Master_Design.pdf"),
-        ("Complete archive", "Complete_AI_System_Design.pdf"),
     ]
     shown = False
     for label, name in review:

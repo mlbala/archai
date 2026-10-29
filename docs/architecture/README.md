@@ -1,8 +1,8 @@
 # Architecture
 
 ArchAI is a modular local CLI. Component commands and `arch auto` share one registry, one
-canonical `EnterpriseDesign`, a linked `ArchitectureGraph`, immutable revisions, and separate
-export bundles.
+canonical `EnterpriseDesign`, a linked `ArchitectureGraph`, immutable revisions, and a
+project-folder export (documents, diagrams, config, infrastructure, state).
 
 ## Run flow
 
@@ -20,8 +20,8 @@ arch auto / arch <component>
        ProposalMerger: normalize IDs, drop dangling references, clamp values
        Design Verifier (role 5): findings; blocking ones trigger <= 2 targeted revision passes
   -> deterministic capacity/cost engine, policy invariants, manual decisions, locks
-  -> validation -> immutable revision -> export bundle (Markdown, PDF, diagrams, IaC, configs,
-     and documents/01-hld, 02-lld, 03-master, 04-complete on a complete export)
+  -> validation -> immutable revision -> project folder (Markdown, PDF, diagrams, IaC, configs,
+     High_Level_Design, Low_Level_Design, and Master_Design)
 ```
 
 Each role call uses a scoped structured-output schema built from only the components in scope, so

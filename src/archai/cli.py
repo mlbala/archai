@@ -725,11 +725,7 @@ def status(
             return
         design = store.load_design()
         manifest = store.load_manifest()
-        export_path = None
-        if metadata.latest_export:
-            candidates = list((store.root / "exports").glob(f"*/{metadata.latest_export}"))
-            export_path = candidates[0] if candidates else None
-        print_status(console, design, manifest, export_path, _latest_run(store))
+        print_status(console, design, manifest, store.current_export_path(), _latest_run(store))
     except BaseException as exc:
         _fail(exc)
 

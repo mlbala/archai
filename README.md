@@ -11,12 +11,11 @@ get a response cache or user RBAC. Saying `cache excluded`, `I don't need RBAC`,
 `deployment excluded` removes that part from the design. The core stays: services, APIs,
 routing, budget, data, and security.
 
-Every accepted design is an immutable revision. `arch auto` exports Markdown, PDF, diagrams,
-Terraform, Kubernetes manifests, gateway config, and policy files. Open these three first:
-`documents/01-hld/High_Level_Design.pdf` (what the system is),
-`documents/02-lld/Low_Level_Design.pdf` (how each hop is implemented), and
-`documents/03-master/Master_Design.pdf` (features, build order, sprints).
-`documents/04-complete/Complete_AI_System_Design.pdf` is the component archive.
+Every accepted design is an immutable revision. `arch auto` writes the files into the project
+folder. Open these three first: `documents/High_Level_Design.pdf` (what the system is),
+`documents/Low_Level_Design.pdf` (how each hop is implemented), and
+`documents/Master_Design.pdf` (features, build order, sprints). There is one delivery document,
+not a second complete-archive PDF. Per-component write-ups stay in `documents/components/`.
 
 The command is `arch`. `archai` is the same program. On macOS, `/usr/bin/arch` already exists,
 so use `archai` if your shell still finds the system command. ArchAI never deploys or applies
@@ -224,11 +223,10 @@ archai auto -p desk-assist -f examples/azure-enterprise-rag/requirements.yaml \
   --non-interactive --formats all
 ```
 
-The run summary prints the bundle path, for example
-`output/desk-assist/exports/0001/<timestamp>/`. Open
-`documents/01-hld/High_Level_Design.pdf` in that folder first. `archai status desk-assist`
-prints the latest export. `archai hld -p desk-assist` and `archai lld -p desk-assist`
-recompile only those packages from the saved revision and do not call a model.
+The run summary prints the project folder, for example `output/desk-assist/`. Open
+`documents/High_Level_Design.pdf` there first. `archai status desk-assist` prints that
+folder. `archai hld -p desk-assist` and `archai lld -p desk-assist` refresh those two
+documents from the saved revision and do not call a model.
 
 See the plan without writing files or calling a model:
 
@@ -281,69 +279,77 @@ The run ID is printed when a non-interactive design stops for missing answers, a
   required when the description does not decide them.
 - Read the review table and correct a wrong row before the design starts.
 - Put a second provider on the `verifier` role when you want a cross-check.
-- After the export, open `documents/01-hld/High_Level_Design.pdf`, then
-  `documents/02-lld/Low_Level_Design.pdf`, then `documents/03-master/Master_Design.pdf`.
-  `documents/04-complete/` is the component archive. Lock a component you want to keep, then
-  run `arch auto` again; locked parts are not overwritten.
+- After the export, open `documents/High_Level_Design.pdf`, then
+  `documents/Low_Level_Design.pdf`, then `documents/Master_Design.pdf`. Lock a component you
+  want to keep, then run `arch auto` again; locked parts are not overwritten.
 - Re-export with `archai export PROJECT` after you only need new files. That does not call a
   model.
 
 ## Where the output is
 
 Projects are stored under `./output` unless `ARCHAI_OUTPUT_DIR` or `--output-dir` says
-otherwise. The summary at the end of `arch auto` prints the bundle path. `archai status PROJECT`
-prints the latest export.
+otherwise. The summary at the end of `arch auto` prints the project folder.
+`archai status PROJECT` prints that same folder. There is no nested `exports/0001/<timestamp>/`
+tree. A later `arch auto` or `archai export` refreshes these files in place. Immutable JSON for
+each accepted revision stays under `revisions/`.
 
 ```text
 output/<project>/
-  revisions/0001/                 immutable design (state JSON, documents, manifest)
-  runs/<run-id>/                  interview progress, so a paused run can resume
-  exports/0001/<bundle>/
-    README.md
-    manifest.json
-    documents/01-hld/             High_Level_Design.md .pdf and diagrams/system.drawio
-    documents/02-lld/             Low_Level_Design.md .pdf and diagrams/system.drawio
-    documents/03-master/          Master_Design.md .pdf
-    documents/04-complete/        Complete_AI_System_Design.md .pdf (archive)
-    documents/requirements/       AI_Enterprise_PRD.md .pdf
-    documents/components/         <Component>_Design.md .pdf
-    diagrams/mermaid|svg|png|drawio/
-    config/policies/              *.yaml
-    config/gateway/               litellm.yaml, apim_policies.xml
-    config/integration_contracts.md
-    infrastructure/primary/*.tf
-    workloads/kubernetes/*.yaml
-    state/                        enterprise_design.json, architecture_graph.json, ...
+  project.json
+  decision_locks.json
+  manual_decisions.json
+  README.md
+  manifest.json
+  documents/
+    High_Level_Design.md .pdf
+    Low_Level_Design.md .pdf
+    Master_Design.md .pdf
+    requirements/               AI_Enterprise_PRD.md .pdf
+    components/                 <Component>_Design.md .pdf
+  diagrams/                     hld.drawio, lld.drawio, mermaid/, svg/, png/, drawio/
+  config/                       policies/, gateway/, integration_contracts.md
+  infrastructure/primary/*.tf
+  workloads/kubernetes/*.yaml
+  state/                        latest enterprise_design.json, architecture_graph.json
+  sources/                      input files used for the design
+  revisions/0001/               immutable revision snapshot (JSON + markdown)
+  runs/<run-id>/                interview progress, so a paused run can resume
 ```
 
-Open `documents/01-hld/High_Level_Design.pdf` first: system context, tools, request path, and
-trust boundaries. Then `documents/02-lld/Low_Level_Design.pdf` for each hop (owner, interface,
-payload, failure). Then `documents/03-master/Master_Design.pdf` for the feature list, service
-build order, and four sprint slices (foundation, core path, controls, operate). Sprints are
-build slices, not dates.
+Open `documents/High_Level_Design.pdf` first: system context, tools, request path, and trust
+boundaries. Then `documents/Low_Level_Design.pdf` for each hop (owner, interface, payload,
+failure). Then `documents/Master_Design.pdf` for the feature list, service build order, and
+four sprint slices (foundation, core path, controls, operate). Sprints are build slices, not
+dates.
+
+Master is the delivery document. It is not a second copy of the architecture. High-level
+design is the system picture. Low-level design is the hop-by-hop implementation. One file per
+component is in `documents/components/` if you need a single policy or service chapter.
 
 The request path is compiled from the saved API contracts, identity, retrieval, budget, and
 routes. It is not a canned chat script. An interactive app uses the streaming chat contract
 (`POST /v1/chat` in the packaged example). A scheduler-only batch app uses `POST /v1/jobs`.
-Identity hops and cache trust-boundary rows appear only when those parts are in the revision.
-Hop owner, interface, payload, and failure are set from that same state. High-level and
-low-level designs are document packages, not design components; they are not listed in
+A FAQ or read-only RAG app does not include a jobs worker or `/v1/jobs`. Identity hops and
+cache trust-boundary rows appear only when those parts are in the revision. High-level design
+prints residency as a region list and names the identity provider from the identity policy
+(Entra ID is labeled assumed when the provider was not selected). Sprint goals name only
+components on the revision, so an excluded cache is not listed in Sprint 3. Low-level design
+repeats the request diagram, not the architecture diagram; other paths are compact hop
+tables. Hop owner, interface, payload, and failure are set from that same state. High-level
+and low-level designs are document packages, not design components; they are not listed in
 component status.
 
-`documents/04-complete/Complete_AI_System_Design.pdf` is the archive of every component, the
-infrastructure bill of materials, and the scale-up table. It keeps context, architecture, and
-deployment. The hop walk stays in the high-level and low-level packages. Replica minimums and
-maximums in the scale-up table are the same numbers written into the generated autoscalers.
-The ceiling is the peak worker estimate times 3, clamped to 3–30. It is a load-test starting
-point. Provider quotas still bound model throughput. PNG and SVG live under `diagrams/`; each
-HLD/LLD folder keeps one `diagrams/system.drawio` file for diagrams.net.
+Replica minimums and maximums in the scale-up table are the same numbers written into the
+generated autoscalers. The ceiling is the peak worker estimate times 3, clamped to 3–30. It is
+a load-test starting point. Provider quotas still bound model throughput. PNG and SVG live
+under `diagrams/`. Open `diagrams/hld.drawio` and `diagrams/lld.drawio` in diagrams.net.
 
 A component that was excluded is still listed. Its document says not applicable and why. Its
 policy file and, for cloud deployment, its Terraform root are omitted.
 
 `--formats all` (the default) writes Markdown, JSON, YAML, Mermaid, draw.io, SVG, Terraform,
 XML, PNG, and PDF. `--formats core` skips PNG and PDF. A full PDF export is the one that
-includes the complete, master, high-level, and low-level PDFs.
+includes the high-level, low-level, and master PDFs.
 
 Terraform is generated for `azure-aca`, `azure-aks`, and `aws-eks`. The `agnostic` profile and
 an excluded deployment produce no Terraform. Kubernetes manifests are generated for AKS and EKS.

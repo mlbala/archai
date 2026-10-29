@@ -7,7 +7,10 @@ from archai.compilers.hops import request_flow, trust_boundaries
 from archai.compilers.report import (
     DISCLAIMER,
     bullets,
+    cell,
     diagram_block,
+    identity_display,
+    join_en,
     project_complete,
     source_label,
     table,
@@ -58,8 +61,8 @@ def high_level_design_document(
         "",
         "This is the architecture review document for this revision. It answers what the "
         "system is, which tools it uses, and how a request moves. The low-level design walks "
-        "each hop. The master design is the build order. `Complete_AI_System_Design` is the "
-        "archive of every component. Open `system.drawio` in this folder in diagrams.net.",
+        "each hop. The master design is the build order. Component documents live in "
+        "`documents/components/`. Open `diagrams/hld.drawio` in diagrams.net.",
         "",
         "## 1. Context",
         "",
@@ -71,8 +74,8 @@ def high_level_design_document(
             f"Users: {', '.join(req.users) or 'unspecified'}",
             f"Channels: {', '.join(req.client_channels) or 'unspecified'}",
             f"Archetypes: {', '.join(req.archetypes) or 'unspecified'}",
-            f"Region and residency: {req.region}; {req.data_residency}",
-            f"Identity: {req.identity_provider or 'not selected'}",
+            f"Region and residency: {req.region}; {cell(req.data_residency)}",
+            f"Identity: {identity_display(design)}",
         ]
     )
     skipped = [
@@ -103,10 +106,13 @@ def high_level_design_document(
     lines.append("")
     lines += table(["Step", "From", "To", "Action"], _request_rows(design))
     lines += ["", "## 4. Trust boundaries", ""]
+    held = ["Budget reservation", "object-level authorization"]
+    if any(service.kind == "tool-executor" for service in design.services):
+        held.append("tool approval")
     lines.append(
         "The enterprise API gateway is the public trust boundary. Managed model APIs sit "
-        "outside it. Budget reservation, object-level authorization, and tool approval stay "
-        "in the application. Rows appear only for controls that exist on this revision."
+        f"outside it. {join_en(held)} stay in the application. Rows appear only for controls "
+        "that exist on this revision."
     )
     lines.append("")
     boundaries = trust_boundaries(design)

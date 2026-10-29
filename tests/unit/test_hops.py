@@ -5,6 +5,8 @@ from pathlib import Path
 import yaml
 
 from archai.application import service
+from archai.application.designer import build_graph
+from archai.compilers.hld import high_level_design_document
 from archai.compilers.hops import (
     control_ownership,
     other_paths,
@@ -12,6 +14,8 @@ from archai.compilers.hops import (
     request_hops,
     trust_boundaries,
 )
+from archai.compilers.lld import low_level_design_document
+from archai.compilers.master import master_design_document
 
 REQUIREMENTS = Path("examples/azure-enterprise-rag/requirements.yaml")
 
@@ -82,6 +86,60 @@ def test_excluded_identity_and_cache_drop_those_hops(tmp_path):
     ownership = control_ownership(design)
     assert "authentication" not in ownership
     assert "cache_authorization" not in ownership
+
+
+def test_faq_omits_jobs_worker_and_async_path(tmp_path):
+    requested = {
+        "idea": "Internal FAQ chatbot that answers from a policy handbook.",
+        "business_outcome": "Let employees find policy answers without a ticket.",
+        "users": ["Employees"],
+        "archetypes": ["enterprise-rag"],
+        "region": "westeurope",
+        "data_residency": ["westeurope"],
+        "tenant_isolation": "single",
+        "allowed_target_providers": ["Azure OpenAI"],
+        "tool_side_effects": "forbidden",
+        "avg_rps": 1,
+        "peak_rps": 3,
+        "input_tokens": 800,
+        "output_tokens": 200,
+        "model_calls_per_request": 1,
+        "monthly_budget": 2000,
+        "availability_target": 99.5,
+        "currency": "EUR",
+        "profile": "azure-aca",
+        "topology": "single-cloud",
+        "client_channels": ["web"],
+        "excluded_components": ["cache"],
+    }
+    source = tmp_path / "faq.yaml"
+    source.write_text(yaml.safe_dump(requested))
+    design = _design(tmp_path / "faq", source, "faq")
+    kinds = {service.kind for service in design.services}
+    paths = {contract.path for contract in design.api_contracts}
+    assert "worker" not in kinds
+    assert "tool-executor" not in kinds
+    assert "ingestion" in kinds
+    assert "/v1/jobs" not in paths
+    assert "/v1/chat" in paths
+    assert design.identity_policy is not None
+    assert design.identity_policy.idp == "Entra ID"
+    assert design.cache_policy is None
+    assert not any(walk.key == "async" for walk in other_paths(design))
+    assert not any(service.id == "svc-worker" for service in design.services)
+    graph = build_graph(design)
+    high = high_level_design_document(design, graph, [])
+    assert "Identity: Entra ID (assumed)" in high
+    assert "['westeurope']" not in high
+    assert "Region and residency: westeurope; westeurope" in high
+    assert "tool approval" not in high
+    low = low_level_design_document(design, graph, [])
+    assert "<!-- archai:diagram architecture -->" not in low
+    assert "<!-- archai:diagram request -->" in low
+    assert "#### Step 1 —" not in low
+    master = master_design_document(design, [])
+    assert "cache are in place" not in master
+    assert "Budget, guardrails, and the threat model are in place before broader rollout." in master
 
 
 def test_batch_primary_api_is_jobs(tmp_path):

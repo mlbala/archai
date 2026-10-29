@@ -52,7 +52,7 @@ class ProjectStore:
 
     def initialize(self) -> ProjectMetadata:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for name in ("sources", "runs", "revisions", "exports"):
+        for name in ("sources", "runs", "revisions"):
             (self.root / name).mkdir(exist_ok=True, mode=0o700)
         if self.project_file.exists():
             return self.metadata()
@@ -197,6 +197,11 @@ class ProjectStore:
         metadata = self.metadata()
         metadata.latest_export = bundle_id
         self._atomic_write(self.project_file, json_bytes(metadata))
+
+    def current_export_path(self) -> Path | None:
+        if (self.root / "manifest.json").exists():
+            return self.root
+        return None
 
     def save_run(self, run: RunState, inputs: dict[str, Any] | None = None) -> Path:
         run_root = self.root / "runs" / run.id

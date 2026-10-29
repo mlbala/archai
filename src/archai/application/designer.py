@@ -100,6 +100,24 @@ def uses_tools(req: RequirementsSpec) -> bool:
     )
 
 
+def needs_async_jobs(req: RequirementsSpec) -> bool:
+    if uses_tools(req):
+        return True
+    users = {item.lower() for item in req.users}
+    if users & {"scheduler", "batch"}:
+        return True
+    text = " ".join(req.archetypes).lower()
+    return any(word in text for word in ("classification", "extraction", "batch", "pipeline"))
+
+
+def needs_queue(req: RequirementsSpec) -> bool:
+    return has_rag(req) or needs_async_jobs(req)
+
+
+def auth_scheme(req: RequirementsSpec) -> str:
+    return f"OIDC bearer token ({req.identity_provider or 'Entra ID'})"
+
+
 def cloud_of(profile: str) -> str:
     if profile.startswith("azure"):
         return "azure"
@@ -318,6 +336,7 @@ def baseline_component(design: EnterpriseDesign, name: str) -> None:
 def _system(design: EnterpriseDesign, req: RequirementsSpec) -> None:
     rag = has_rag(req)
     tools = uses_tools(req)
+    jobs = needs_async_jobs(req)
     gateway = _pick(req.profile, "Azure API Management", "Amazon API Gateway + ALB", "Kong/APISIX")
     compute = _pick(
         req.profile,
@@ -355,13 +374,8 @@ def _system(design: EnterpriseDesign, req: RequirementsSpec) -> None:
             owner="application",
             technology=f"Python/FastAPI on {compute}",
             scaling="HTTP concurrency autoscaling; stateless replicas",
-            responsibilities=[
-                "Derive tenant, user, and department from trusted claims",
-                "Conversation context, prompt templates, and streaming responses",
-                "Coordinate retrieval, tool calls, and human approval gates",
-                "Publish asynchronous jobs through a transactional outbox",
-            ],
-            exposes=["chat", "conversations", "jobs", "feedback"],
+            responsibilities=_app_responsibilities(rag, tools, jobs),
+            exposes=_app_exposes(rag, jobs),
             depends_on=app_dependencies,
             data_owned=["store-state"],
         ),
@@ -453,22 +467,23 @@ def _system(design: EnterpriseDesign, req: RequirementsSpec) -> None:
                 depends_on=["store-state"],
             )
         )
-    services.append(
-        Service(
-            id="svc-worker",
-            name="Asynchronous job worker",
-            kind="worker",
-            region=req.region,
-            owner="application",
-            technology=f"Python worker on {compute}",
-            scaling="queue-based autoscaling within downstream quota",
-            responsibilities=[
-                "Process long-running workflows, batch evaluation, and exports",
-                "Idempotent state transitions with deduplication keys",
-            ],
-            depends_on=["svc-admission", "store-state"],
+    if jobs:
+        services.append(
+            Service(
+                id="svc-worker",
+                name="Asynchronous job worker",
+                kind="worker",
+                region=req.region,
+                owner="application",
+                technology=f"Python worker on {compute}",
+                scaling="queue-based autoscaling within downstream quota",
+                responsibilities=[
+                    "Process long-running workflows, batch evaluation, and exports",
+                    "Idempotent state transitions with deduplication keys",
+                ],
+                depends_on=["svc-admission", "store-state"],
+            )
         )
-    )
     services.append(
         Service(
             id="svc-observe",
@@ -497,6 +512,7 @@ def _system(design: EnterpriseDesign, req: RequirementsSpec) -> None:
         "Split ingress, orchestration, model admission, AI gateway"
         + (", retrieval/ingestion" if rag else "")
         + (", and tool execution" if tools else "")
+        + (", and a jobs worker" if jobs else "")
         + " into independently scaled services.",
         "Each control (authentication, budget, provider retry, tool authorization) gets exactly "
         "one owner, avoiding duplicate retries and conflicting policies.",
@@ -505,9 +521,47 @@ def _system(design: EnterpriseDesign, req: RequirementsSpec) -> None:
     )
 
 
+def _app_responsibilities(rag: bool, tools: bool, jobs: bool) -> list[str]:
+    items = [
+        "Derive tenant, user, and department from trusted claims",
+        "Conversation context, prompt templates, and streaming responses",
+    ]
+    if tools and rag:
+        items.append("Coordinate retrieval, tool calls, and human approval gates")
+    elif tools:
+        items.append("Coordinate tool calls and human approval gates")
+    elif rag:
+        items.append("Coordinate retrieval and grounded responses")
+    if jobs:
+        items.append("Publish asynchronous jobs through a transactional outbox")
+    return items
+
+
+def _app_exposes(rag: bool, jobs: bool) -> list[str]:
+    items = ["chat", "conversations"]
+    if jobs:
+        items.append("jobs")
+    if rag:
+        items.append("documents")
+    items.append("feedback")
+    return items
+
+
+def _state_purpose(req: RequirementsSpec) -> str:
+    parts = ["conversations"]
+    if needs_async_jobs(req):
+        parts.append("jobs")
+        parts.append("outbox")
+    elif needs_queue(req):
+        parts.append("outbox")
+    if uses_tools(req) and req.tool_side_effects == "approval":
+        parts.append("approvals")
+    return ", ".join(parts)
+
+
 def _api(design: EnterpriseDesign, req: RequirementsSpec) -> None:
     peak_rpm = max(60, int(req.peak_rps * 60))
-    auth = f"OIDC bearer token ({req.identity_provider or 'Entra ID'})"
+    auth = auth_scheme(req)
     contracts = [
         APIContract(
             id="api-chat",
@@ -534,31 +588,34 @@ def _api(design: EnterpriseDesign, req: RequirementsSpec) -> None:
             request_fields=["conversation_id"],
             response_fields=["messages[]", "citations[]", "created_at"],
         ),
-        APIContract(
-            id="api-jobs",
-            path="/v1/jobs",
-            method="POST",
-            auth=auth,
-            summary="Submit a long-running job; returns 202 with a job ID",
-            service_id="svc-app",
-            scopes=["jobs.submit"],
-            rate_limit_rpm=max(30, peak_rpm // 4),
-            request_fields=["job_type", "input_ref", "idempotency_key"],
-            response_fields=["job_id", "status_url"],
-        ),
-        APIContract(
-            id="api-job-status",
-            path="/v1/jobs/{job_id}",
-            method="GET",
-            auth=auth,
-            summary="Read job status and result references (object-level authorized)",
-            service_id="svc-app",
-            scopes=["jobs.read"],
-            rate_limit_rpm=peak_rpm,
-            request_fields=["job_id"],
-            response_fields=["status", "result_ref", "error"],
-        ),
     ]
+    if needs_async_jobs(req):
+        contracts += [
+            APIContract(
+                id="api-jobs",
+                path="/v1/jobs",
+                method="POST",
+                auth=auth,
+                summary="Submit a long-running job; returns 202 with a job ID",
+                service_id="svc-app",
+                scopes=["jobs.submit"],
+                rate_limit_rpm=max(30, peak_rpm // 4),
+                request_fields=["job_type", "input_ref", "idempotency_key"],
+                response_fields=["job_id", "status_url"],
+            ),
+            APIContract(
+                id="api-job-status",
+                path="/v1/jobs/{job_id}",
+                method="GET",
+                auth=auth,
+                summary="Read job status and result references (object-level authorized)",
+                service_id="svc-app",
+                scopes=["jobs.read"],
+                rate_limit_rpm=peak_rpm,
+                request_fields=["job_id"],
+                response_fields=["status", "result_ref", "error"],
+            ),
+        ]
     if has_rag(req):
         contracts.append(
             APIContract(
@@ -864,32 +921,36 @@ def _data(design: EnterpriseDesign, req: RequirementsSpec) -> None:
         ),
         DataStore(
             id="store-state",
-            name="Conversation and job state",
+            name="Conversation and job state" if needs_async_jobs(req) else "Conversation state",
             kind=postgres,
-            purpose="conversations, jobs, outbox, approvals",
+            purpose=_state_purpose(req),
             region=req.region,
             partition_key="tenant_id",
-            consistency="read-committed transactions; outbox in the same transaction",
+            consistency="read-committed transactions; outbox in the same transaction"
+            if needs_queue(req)
+            else "read-committed transactions",
             retention_days=365,
             owner_service="svc-app",
             encryption="encryption at rest; row-level security by tenant",
             backup="point-in-time restore, 35-day retention",
         ),
-        DataStore(
-            id="store-object",
-            name="Object storage",
-            kind=_pick(profile, "Azure Blob Storage", "Amazon S3", "object storage"),
-            purpose="source documents by immutable object reference",
-            region=req.region,
-            partition_key="tenant_id",
-            consistency="read-after-write",
-            retention_days=365,
-            owner_service="svc-ingestion" if has_rag(req) else "svc-app",
-            encryption="encryption at rest; private access only; versioning enabled",
-            backup="soft delete and versioning; lifecycle policy",
-        ),
     ]
     if has_rag(req):
+        stores.append(
+            DataStore(
+                id="store-object",
+                name="Object storage",
+                kind=_pick(profile, "Azure Blob Storage", "Amazon S3", "object storage"),
+                purpose="source documents by immutable object reference",
+                region=req.region,
+                partition_key="tenant_id",
+                consistency="read-after-write",
+                retention_days=365,
+                owner_service="svc-ingestion",
+                encryption="encryption at rest; private access only; versioning enabled",
+                backup="soft delete and versioning; lifecycle policy",
+            )
+        )
         stores.append(
             DataStore(
                 id="store-vector",
@@ -914,7 +975,8 @@ def _data(design: EnterpriseDesign, req: RequirementsSpec) -> None:
     add_decision(
         design,
         "data",
-        "PostgreSQL for ledger and state, object storage for documents",
+        "PostgreSQL for ledger and state"
+        + (", object storage for documents" if has_rag(req) else ""),
         f"Use {postgres} (separate databases) for the budget ledger and application state"
         + (", plus one managed vector index" if has_rag(req) else "")
         + ".",
@@ -1060,6 +1122,10 @@ def _infra(design: EnterpriseDesign, req: RequirementsSpec) -> None:
         ),
     }
     cloud, compute, resources, networking = profiles[req.profile]
+    if not needs_queue(req):
+        resources = [item for item in resources if item.name not in {"sb", "sqs", "broker"}]
+    if not rag:
+        resources = [item for item in resources if item.name not in {"st", "s3", "objects"}]
     if rag and cloud == "azure":
         resources.append(
             CloudResource(
@@ -1107,9 +1173,13 @@ def _infra(design: EnterpriseDesign, req: RequirementsSpec) -> None:
 
 def _resilience(design: EnterpriseDesign, req: RequirementsSpec) -> None:
     broker = _pick(req.profile, "Azure Service Bus", "AWS SQS", "validated managed broker")
-    design.queue_policy = QueuePolicy(
-        broker=broker, max_attempts=5, max_age_seconds=3600, dlq_owner="operations"
-    )
+    kinds = {service.kind for service in design.services}
+    if needs_queue(req):
+        design.queue_policy = QueuePolicy(
+            broker=broker, max_attempts=5, max_age_seconds=3600, dlq_owner="operations"
+        )
+    else:
+        design.queue_policy = None
     dr = {
         "single-cloud": "Zone-redundant services in one region; restore from backups to a "
         "secondary region by runbook",
@@ -1118,41 +1188,60 @@ def _resilience(design: EnterpriseDesign, req: RequirementsSpec) -> None:
         "application-dr": "Warm standby environment in a recovery region with separate IaC "
         "roots, data replication, budget authority, and traffic switching",
     }[req.topology]
+    timeouts = [
+        "Gateway → application: 120 s (streaming)",
+        "Application → model admission: 5 s",
+        "AI gateway → provider: 60 s first token, 120 s total",
+    ]
+    if "worker" in kinds:
+        timeouts.append("Worker job: 15 min with lock renewal")
+    elif "ingestion" in kinds:
+        timeouts.append("Ingestion job: 15 min with lock renewal")
+    scaling = ["Application: scale on concurrent HTTP requests"]
+    if design.queue_policy:
+        worker_label = "Workers" if "worker" in kinds else "Ingestion"
+        scaling.append(f"{worker_label}: scale on {broker} queue length, capped by provider quota")
+    scaling.append("Liveness never depends on provider health; readiness reports degraded state")
+    degraded = [
+        "Primary provider unavailable → approved fallback route if eligible",
+        "Budget authority unavailable → reject new chargeable work (hard budget)",
+    ]
+    if has_rag(req):
+        degraded.append(
+            "Retrieval unavailable → answer that sources are unavailable, no ungrounded answer"
+        )
     design.resilience = ResiliencePlan(
         retry_policy="AI gateway: one retry on timeout/429/5xx with jittered backoff, honouring "
         "Retry-After and the request deadline",
         retry_owner="ai-gateway",
         circuit_breaker="Per-endpoint closed/open/half-open; open after 5 failures in 30 s; "
         "half-open probe budget of 2 requests",
-        timeouts=[
-            "Gateway → application: 120 s (streaming)",
-            "Application → model admission: 5 s",
-            "AI gateway → provider: 60 s first token, 120 s total",
-            "Worker job: 15 min with lock renewal",
-        ],
-        scaling_rules=[
-            "Application: scale on concurrent HTTP requests",
-            f"Workers: scale on {broker} queue length, capped by provider quota",
-            "Liveness never depends on provider health; readiness reports degraded state",
-        ],
-        degraded_modes=[
-            "Primary provider unavailable → approved fallback route if eligible",
-            "Budget authority unavailable → reject new chargeable work (hard budget)",
-            "Retrieval unavailable → answer that sources are unavailable, no ungrounded answer",
-        ],
+        timeouts=timeouts,
+        scaling_rules=scaling,
+        degraded_modes=degraded,
         dr_strategy=dr,
         rto_minutes=req.rto_minutes,
         rpo_minutes=req.rpo_minutes,
     )
-    add_decision(
-        design,
-        "resilience",
-        f"{broker} with at-least-once delivery",
-        f"Use {broker} with DLQ, idempotent handlers, and outbox publishing.",
-        "Managed broker with dead-lettering matches the hosting profile.",
-        ["Celery with Redis", "In-process background tasks"],
-        "Handlers must be idempotent; exactly-once external side effects are not claimed.",
-    )
+    if design.queue_policy:
+        add_decision(
+            design,
+            "resilience",
+            f"{broker} with at-least-once delivery",
+            f"Use {broker} with DLQ, idempotent handlers, and outbox publishing.",
+            "Managed broker with dead-lettering matches the hosting profile.",
+            ["Celery with Redis", "In-process background tasks"],
+            "Handlers must be idempotent; exactly-once external side effects are not claimed.",
+        )
+    else:
+        add_decision(
+            design,
+            "resilience",
+            "Synchronous request path with provider retry only",
+            "Keep retries on the AI gateway; do not introduce a job queue on this revision.",
+            "No long-running jobs or ingestion workers are in scope.",
+            ["Managed broker with DLQ"],
+        )
 
 
 def _auth(design: EnterpriseDesign, req: RequirementsSpec) -> None:
@@ -1208,7 +1297,9 @@ def _auth(design: EnterpriseDesign, req: RequirementsSpec) -> None:
         elif any(word in lowered for word in ("author", "editor", "curator", "content")):
             permissions = ["chat.invoke", "chat.read", "documents.write"]
         else:
-            permissions = ["chat.invoke", "chat.read", "jobs.submit", "jobs.read", "feedback.write"]
+            permissions = ["chat.invoke", "chat.read", "feedback.write"]
+            if needs_async_jobs(req):
+                permissions[2:2] = ["jobs.submit", "jobs.read"]
         roles.append(
             RoleDefinition(
                 name=name, description=f"Application role for {name}", permissions=permissions
@@ -1287,39 +1378,47 @@ def _guard(design: EnterpriseDesign, req: RequirementsSpec) -> None:
             control="size, content, and task authorization",
             owner="application",
             enforcement="custom-runtime-required",
-        ),
-        GuardrailControl(
-            id="guard-retrieval",
-            stage="retrieval",
-            control="tenant and object ACL filter",
-            owner="application",
-            enforcement="custom-runtime-required",
-        ),
-        GuardrailControl(
-            id="guard-tools",
-            stage="tool",
-            control="schema, authorization, and exact-argument approval",
-            owner="workflow",
-            enforcement="custom-runtime-required",
-        ),
+        )
+    ]
+    if has_rag(req):
+        controls.append(
+            GuardrailControl(
+                id="guard-retrieval",
+                stage="retrieval",
+                control="tenant and object ACL filter",
+                owner="application",
+                enforcement="custom-runtime-required",
+            )
+        )
+    if uses_tools(req):
+        controls.append(
+            GuardrailControl(
+                id="guard-tools",
+                stage="tool",
+                control="schema, authorization, and exact-argument approval",
+                owner="workflow",
+                enforcement="custom-runtime-required",
+            )
+        )
+        if req.tool_side_effects == "forbidden":
+            controls.append(
+                GuardrailControl(
+                    id="guard-no-side-effects",
+                    stage="execution",
+                    control="read-only tool credentials; state-changing tools are not registered",
+                    owner="platform",
+                    enforcement="custom-runtime-required",
+                )
+            )
+    controls.append(
         GuardrailControl(
             id="guard-output",
             stage="output",
             control="schema and sensitive-data release validation",
             owner="application",
             enforcement="custom-runtime-required",
-        ),
-    ]
-    if req.tool_side_effects == "forbidden":
-        controls.append(
-            GuardrailControl(
-                id="guard-no-side-effects",
-                stage="execution",
-                control="read-only tool credentials; state-changing tools are not registered",
-                owner="platform",
-                enforcement="custom-runtime-required",
-            )
         )
+    )
     controls.append(
         GuardrailControl(
             id="guard-audit",
@@ -1482,6 +1581,10 @@ def _security(design: EnterpriseDesign, req: RequirementsSpec) -> None:
                 residual_risk="medium",
             )
         )
+    known = {service.id for service in design.services} | {store.id for store in design.data_stores}
+    known.add("all services")
+    for threat in threats:
+        threat.affected = [item for item in threat.affected if item in known]
     design.threats = threats
 
 
@@ -1669,13 +1772,16 @@ def lane_for(kind: str) -> str:
 def build_graph(design: EnterpriseDesign) -> ArchitectureGraph:
     nodes = [
         Node(id="client", label="Enterprise clients", kind="client", lane=LANES[0]),
-        Node(
-            id="identity",
-            label=design.identity_policy.idp if design.identity_policy else "External IdP",
-            kind="identity",
-            lane=LANES[0],
-        ),
     ]
+    if design.identity_policy:
+        nodes.append(
+            Node(
+                id="identity",
+                label=design.identity_policy.idp,
+                kind="identity",
+                lane=LANES[0],
+            )
+        )
     nodes.extend(
         Node(id=service.id, label=service.name, kind=service.kind, lane=lane_for(service.kind))
         for service in design.services
@@ -1721,10 +1827,12 @@ def build_graph(design: EnterpriseDesign) -> ArchitectureGraph:
             )
 
     gateways = [service.id for service in design.services if service.kind == "gateway"]
-    add("client", "identity", "sign in (OIDC + PKCE)", "identity")
+    if design.identity_policy:
+        add("client", "identity", "sign in (OIDC + PKCE)", "identity")
     for gateway in gateways or ["svc-app"]:
         add("client", gateway, "HTTPS + bearer token")
-        add("identity", gateway, "token signing keys", "identity")
+        if design.identity_policy:
+            add("identity", gateway, "token signing keys", "identity")
     store_ids = {store.id for store in design.data_stores}
     for service in design.services:
         for dependency in service.depends_on:
@@ -1752,6 +1860,12 @@ def build_graph(design: EnterpriseDesign) -> ArchitectureGraph:
     observers = [service.id for service in design.services if service.kind == "operations"]
     for observer in observers[:1]:
         for service in design.services:
-            if service.kind in {"application", "orchestration", "ai-gateway", "worker"}:
+            if service.kind in {
+                "application",
+                "orchestration",
+                "ai-gateway",
+                "worker",
+                "ingestion",
+            }:
                 add(service.id, observer, "telemetry", "telemetry")
     return ArchitectureGraph(nodes=nodes, edges=edges)
