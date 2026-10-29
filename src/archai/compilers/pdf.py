@@ -334,6 +334,9 @@ def render_pdf(
             return
         header, body = rows_raw[0], rows_raw[1:]
         columns = len(header)
+        if columns >= 7 and body:
+            _add_record_table(header, body)
+            return
         weights = [
             max(4, min(60, max(len(row[i]) if i < len(row) else 0 for row in rows_raw)))
             for i in range(columns)
@@ -363,6 +366,46 @@ def render_pdf(
         )
         story.append(grid)
         story.append(Spacer(1, 3 * mm))
+
+    def _add_record_table(header: list[str], body: list[list[str]]) -> None:
+        """Wide tables become one labeled record per row so columns stay readable on A4."""
+        label_width = 38 * mm
+        value_width = portrait_width - label_width
+        banner = ParagraphStyle("RecordBanner", parent=small_bold, fontSize=8, leading=10)
+        label = ParagraphStyle(
+            "RecordLabel",
+            parent=small,
+            fontName="Helvetica-Bold",
+            textColor=colors.HexColor("#1e3a8a"),
+        )
+        for row in body:
+            padded = [*row, *[""] * (len(header) - len(row))][: len(header)]
+            title = padded[0] or "Record"
+            data: list[list[Any]] = [[para(_inline(title), banner), ""]]
+            pairs = list(zip(header[1:], padded[1:], strict=False))
+            if not pairs:
+                pairs = [(header[0], title)]
+            for name, value in pairs:
+                data.append([para(_inline(name), label), para(_inline(value or "—"), small)])
+            grid = Table(data, colWidths=[label_width, value_width], hAlign="LEFT")
+            grid.setStyle(
+                TableStyle(
+                    [
+                        ("SPAN", (0, 0), (-1, 0)),
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
+                        ("BACKGROUND", (0, 1), (0, -1), colors.HexColor("#f8fafc")),
+                        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                        ("TOPPADDING", (0, 0), (-1, -1), 3),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                        ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
+                    ]
+                )
+            )
+            story.append(grid)
+            story.append(Spacer(1, 2.2 * mm))
 
     def add_diagram(key: str) -> bool:
         scene = diagrams.get(key)

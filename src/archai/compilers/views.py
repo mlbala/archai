@@ -18,6 +18,7 @@ from archai.compilers.scene import (
     layered_scene,
     sequence_scene,
 )
+from archai.domain.scale import replica_ceiling, scale_targets
 from archai.schemas.models import ArchitectureGraph, EnterpriseDesign, Service
 
 STYLE_BY_KIND = {
@@ -661,6 +662,40 @@ def recovery_view(design: EnterpriseDesign) -> View | None:
     )
 
 
+def scale_view(design: EnterpriseDesign) -> View | None:
+    targets = scale_targets(design)
+    if not targets:
+        return None
+    order = (
+        ("http", "Request-scaled", "application"),
+        ("queue", "Queue-scaled", "worker"),
+        ("managed", "Platform-managed", "ops"),
+    )
+    groups: list[tuple[str, list[tuple[str, str]], str]] = []
+    lines = ["flowchart LR"]
+    for mode, title, style in order:
+        members = [item for item in targets if item.mode == mode]
+        if not members:
+            continue
+        groups.append((title, [(item.name, item.replicas) for item in members], style))
+        lines.append(f'    subgraph {mode}["{mlabel(title)}"]')
+        for item in members:
+            lines.append(
+                f'        {mid(item.service_id)}["{mlabel(item.name)}<br/>{mlabel(item.replicas)}"]'
+            )
+        lines.append("    end")
+    label = f"{design.requirements.profile} | ceiling {replica_ceiling(design)}"
+    scene = group_scene("Scale-up architecture", groups, label, None, None)
+    return View(
+        "scale",
+        "Scale-up architecture",
+        "How each service scales: request concurrency, queue depth, or platform-managed capacity. "
+        "Replica ranges match the generated manifests and are load-test starting points.",
+        "\n".join(lines) + "\n",
+        scene,
+    )
+
+
 def all_views(design: EnterpriseDesign, graph: ArchitectureGraph) -> list[View]:
     views: list[View | None] = [
         architecture_view(design, graph),
@@ -675,20 +710,21 @@ def all_views(design: EnterpriseDesign, graph: ArchitectureGraph) -> list[View]:
         async_view(design),
         guardrail_view(design),
         recovery_view(design),
+        scale_view(design),
     ]
     return [view for view in views if view is not None]
 
 
 COMPONENT_VIEWS: dict[str, tuple[str, ...]] = {
-    "system": ("architecture", "request"),
+    "system": ("architecture", "request", "scale"),
     "api": ("request",),
     "routing": ("fallback",),
     "budget": ("budget",),
     "workflow": ("workflow-",),
     "rag": ("ingestion",),
     "data": ("data",),
-    "infra": ("deployment", "recovery"),
-    "resilience": ("async", "fallback", "recovery"),
+    "infra": ("deployment", "recovery", "scale"),
+    "resilience": ("async", "fallback", "recovery", "scale"),
     "auth": ("oauth-",),
     "guard": ("guardrails",),
     "security": ("architecture", "guardrails"),
