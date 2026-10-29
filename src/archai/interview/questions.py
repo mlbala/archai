@@ -102,6 +102,16 @@ def _availability_check(value: Any, data: dict[str, Any]) -> str | None:
 QUESTIONS: tuple[Question, ...] = (
     # ------------------------------------------------------------------ business
     Question(
+        "REQ-IDEA",
+        "idea",
+        "Business goals and users",
+        "Describe the AI application you want to design",
+        "text",
+        True,
+        "What it does and for whom. Example: 'An internal support copilot that answers "
+        "from policy documents without exposing other tenants' data'.",
+    ),
+    Question(
         "REQ-BUSINESS_OUTCOME",
         "business_outcome",
         "Business goals and users",

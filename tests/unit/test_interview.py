@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import pytest
 
 from archai.errors import InterviewPaused
+from archai.ingestion import CRITICAL_FIELDS
 from archai.interview.questions import QUESTION_BY_FIELD, missing_questions, parse_answer
 from archai.interview.session import InterviewSession, Suggestion
 
@@ -94,6 +95,22 @@ def test_parse_answers_by_type():
         parse_answer(QUESTION_BY_FIELD["peak_rps"], "1", {"avg_rps": "2"})
 
 
+def test_every_critical_field_is_an_interview_question():
+    missing = [name for name in CRITICAL_FIELDS if name not in QUESTION_BY_FIELD]
+    assert missing == []
+    assert QUESTION_BY_FIELD["idea"].id == "REQ-IDEA"
+    assert QUESTION_BY_FIELD["idea"].critical is True
+
+
+def test_session_asks_for_the_idea_when_it_was_not_provided():
+    data = dict(FULL)
+    del data["idea"]
+    io = ScriptedIO(["An internal support copilot grounded in policy documents."])
+    result = InterviewSession(io, data, review=False).run()
+    assert result["idea"] == "An internal support copilot grounded in policy documents."
+    assert io.asked == [QUESTION_BY_FIELD["idea"].prompt]
+
+
 def test_only_missing_and_applicable_questions_are_asked():
     data = dict(COMPLETE)
     del data["monthly_budget"]
@@ -147,7 +164,7 @@ def test_session_back_skip_validation_suggestions_and_persistence():
 def test_critical_questions_cannot_be_skipped_and_clarifications_are_recorded():
     data = dict(FULL)
     del data["tenant_isolation"]
-    io = ScriptedIO(["skip", "", "single", "ServiceNow", "Refund faster"], review=["1", ""])
+    io = ScriptedIO(["skip", "", "single", "ServiceNow", "Refund faster"], review=["2", ""])
     session = InterviewSession(
         io, data, clarifying_questions=["Which ticketing system executes refunds?"]
     )
