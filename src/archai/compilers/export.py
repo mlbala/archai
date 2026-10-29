@@ -40,8 +40,15 @@ DIAGRAM_VIEWS = (
     "oauth",
     "data",
     "async",
+    "scale",
+    "scaleup",
 )
-VIEW_ALIASES = {"system": "architecture", "workflow": "workflow-", "oauth": "oauth-"}
+VIEW_ALIASES = {
+    "system": "architecture",
+    "workflow": "workflow-",
+    "oauth": "oauth-",
+    "scaleup": "scale",
+}
 
 
 def normalize_formats(value: str) -> set[str]:

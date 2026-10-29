@@ -39,6 +39,8 @@ the deterministic baseline with a warning; the component's "Designed by" label r
 - `application/designer.py` — deterministic baseline and graph projection.
 - `compilers/` — documents (`report.py`), views and scenes (`views.py`, `scene.py`), PDF
   (`pdf.py`), Terraform and Kubernetes (`terraform.py`), exports (`export.py`).
+- `domain/scale.py` — the scale-up contract. The complete design document, the scale diagram,
+  and the generated autoscaler minimums and maximums all use this one calculation.
 - `ui.py` — Rich interview prompts, live status board, summaries.
 
 The generated target system is distinct from the designer. Target assets describe managed model

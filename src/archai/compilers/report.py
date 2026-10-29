@@ -7,6 +7,7 @@ from typing import Any
 
 from archai.application.registry import COMPONENTS
 from archai.compilers.views import View, all_views, views_for
+from archai.domain.scale import replica_ceiling, scale_targets
 from archai.schemas.models import (
     ArchitectureGraph,
     ComponentStatus,
@@ -132,6 +133,7 @@ def component_document(
     views: list[View] | None = None,
     skip_views: set[str] | None = None,
     embedded: bool = False,
+    include_scale: bool = True,
 ) -> str:
     if component == "requirements":
         return requirements_document(design, level=level)
@@ -190,7 +192,7 @@ def component_document(
         value = getattr(req, name, None)
         lines.append(f"- **{name.replace('_', ' ').capitalize()}:** {cell(value)}")
     lines += ["", f"{h2} 2. Design", ""]
-    lines += _component_details(component, design, h3)
+    lines += _component_details(component, design, h3, include_scale=include_scale)
     selected = views_for(component, views if views is not None else all_views(design, graph))
     selected = [view for view in selected if not skip_views or view.key not in skip_views]
     if selected:
@@ -242,7 +244,51 @@ def component_document(
     return "\n".join(lines) + "\n"
 
 
-def _component_details(component: str, design: EnterpriseDesign, h3: str) -> list[str]:
+def scale_body(design: EnterpriseDesign) -> list[str]:
+    """Prose and table for the scale-up contract. No heading and no diagram."""
+    targets = scale_targets(design)
+    if not targets:
+        return ["_No services are defined, so no scale-up plan was produced._"]
+    ceiling = replica_ceiling(design)
+    workers = design.capacity.worker_count if design.capacity else "unspecified"
+    lines = [
+        "Each service scales on its own signal. Request-path services scale with concurrency. "
+        "Queue workers scale with queue depth and can scale to zero. The enterprise gateway and "
+        "telemetry pipeline stay on managed capacity, so they are not given a generated replica "
+        "autoscaler.",
+        "",
+        f"- Replica ceiling: **{ceiling}** per generated workload "
+        f"(peak worker estimate {workers} x 3, clamped to 3-30).",
+        "- These minimums and maximums are the same numbers written into the generated "
+        "Terraform and Kubernetes manifests.",
+        "- They are load-test starting points. Provider token and request quotas bound model "
+        "throughput regardless of replica count.",
+        "- Queue workers and HTTP services never share an autoscaler.",
+        "",
+        *table(
+            ["Service", "Mode", "Replicas", "Scales on", "Hard bound"],
+            [
+                [
+                    f"{item.name} (`{item.service_id}`)",
+                    item.mode,
+                    item.replicas,
+                    item.trigger,
+                    item.bound,
+                ]
+                for item in targets
+            ],
+        ),
+    ]
+    return lines
+
+
+def _scale_lines(design: EnterpriseDesign, heading: str) -> list[str]:
+    return [f"{heading} Scale-up architecture", "", *scale_body(design)]
+
+
+def _component_details(
+    component: str, design: EnterpriseDesign, h3: str, *, include_scale: bool = True
+) -> list[str]:
     req = design.requirements
     if component == "system":
         lines = [f"{h3} Microservice catalog", ""]
@@ -275,6 +321,8 @@ def _component_details(component: str, design: EnterpriseDesign, h3: str) -> lis
                 ],
             ),
         ]
+        if include_scale:
+            lines += ["", *_scale_lines(design, h3)]
         return lines
     if component == "api":
         lines = [f"{h3} API contracts", ""]
@@ -531,6 +579,8 @@ def _component_details(component: str, design: EnterpriseDesign, h3: str) -> lis
             "- Prerequisites: user-owned container images, approved subscriptions/accounts, "
             "networks, quotas, and model deployments.",
         ]
+        if include_scale:
+            lines += ["", *_scale_lines(design, h3)]
         return lines
     if component == "resilience":
         lines = []
@@ -567,6 +617,8 @@ def _component_details(component: str, design: EnterpriseDesign, h3: str) -> lis
                 "",
                 *bullets(resilience.degraded_modes),
             ]
+        if include_scale:
+            lines += ["", *_scale_lines(design, h3)]
         lines += [
             "",
             "- Provider fallback protects only the model dependency; it is not "
@@ -948,6 +1000,11 @@ def complete_document(
         "",
         (design.prd.summary if design.prd and design.prd.summary else req.business_outcome),
         "",
+        "This is the end-to-end design for the application described in the requirements. "
+        "It contains the architecture diagrams, the microservice design, a chapter for each "
+        "component, the infrastructure design, and the scale-up architecture. Tables and "
+        "diagrams are compiled from the same canonical state.",
+        "",
     ]
     lines += bullets(_highlights(design))
     used: set[str] = set()
@@ -956,6 +1013,7 @@ def complete_document(
         if key in by_key:
             lines += diagram_block(by_key[key], "###")
             used.add(key)
+    used.add("scale")
     lines += ["## Component status", ""]
     lines += table(
         ["Component", "Status", "Designed by", "Document"],
@@ -986,9 +1044,15 @@ def complete_document(
             views=views,
             skip_views=used,
             embedded=True,
+            include_scale=False,
         ).split("\n")
-        lines += ["", f"## {number}. {COMPONENTS[component].title}", "", *body[1:]]
+        title = "Microservices" if component == "system" else COMPONENTS[component].title
+        lines += ["", f"## {number}. {title}", "", *body[1:]]
         number += 1
+    lines += ["", f"## {number}. Scale-up architecture", ""]
+    lines += scale_body(design)
+    if "scale" in by_key:
+        lines += ["", *diagram_block(by_key["scale"], "###")]
     lines += ["", "## Cross-component verification", ""]
     if design.verification_summary:
         lines += [design.verification_summary, ""]
@@ -1055,6 +1119,11 @@ def _highlights(design: EnterpriseDesign) -> list[str]:
         f"{len(design.services)} services, {len(design.api_contracts)} API operations, "
         f"{len(design.data_stores)} data stores, {len(design.workflows)} workflows",
     ]
+    if design.services:
+        items.append(
+            f"Scale-up ceiling: {replica_ceiling(design)} replicas per generated workload "
+            "(load-test starting point)"
+        )
     if design.deployment:
         items.append(
             f"Hosting: {design.deployment.compute or design.deployment.name} in "

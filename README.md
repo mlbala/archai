@@ -132,7 +132,8 @@ output/<project>/
     documents/<Component>_Design.md|pdf   one standalone document per component
     diagrams/<view>.{mmd,svg,png}      architecture, request flow, OAuth flows, deployment,
                                        data ownership, ingestion, workflows, budget lifecycle,
-                                       provider fallback, async jobs, guardrails, recovery
+                                       provider fallback, async jobs, guardrails, recovery,
+                                       scale-up
     diagrams/architecture_diagram.drawio
     infrastructure/primary/*.tf        Terraform root for the profile (azure-aca, azure-aks, aws-eks)
     workloads/kubernetes/*.yaml        Deployments, HPAs, KEDA ScaledObjects (AKS/EKS)
