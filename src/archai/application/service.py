@@ -16,7 +16,6 @@ from archai.application.extraction import apply_quoted_suggestions, interview_su
 from archai.application.merge import enforce_invariants
 from archai.application.registry import (
     AUTO_COMPONENTS,
-    COMPILED_COMPONENTS,
     COMPONENTS,
     DOCUMENT_PACKAGES,
 )
@@ -57,6 +56,7 @@ from archai.schemas.models import (
     DecisionLock,
     EnterpriseDesign,
     ManualDecision,
+    OpenDecision,
     RequirementsSpec,
     RevisionManifest,
     RunState,
@@ -93,6 +93,7 @@ class Interviewer(Protocol):
         suggestions: dict[str, Suggestion],
         clarifying_questions: list[str],
         persist: Callable[[dict[str, Any]], None],
+        confirmed: frozenset[str] = frozenset(),
     ) -> dict[str, Any]: ...
 
     def fix(
@@ -190,6 +191,68 @@ def build_team(
     )
 
 
+def _question_key(text: str) -> str:
+    return " ".join(text.split()).lower()
+
+
+def answers_to_apply(
+    baseline: EnterpriseDesign | None, requirements: Any, scope: list[str]
+) -> list[OpenDecision] | None:
+    """The answers an update adds, when answers are the only change; otherwise None.
+
+    Such an update revises the last revision instead of designing the project again: the
+    roles that own the affected parts apply each answer, and the review covers what changed.
+    """
+    if baseline is None or not {"requirements", "system"} <= set(scope):
+        return None
+    unchanged = {"clarifications", "evidence", "assumptions", "conflicts"}
+    if baseline.requirements.model_dump(mode="json", exclude=unchanged) != requirements.model_dump(
+        mode="json", exclude=unchanged
+    ):
+        return None
+    earlier = {
+        _question_key(item.question): item.answer for item in baseline.requirements.clarifications
+    }
+    added = [
+        item
+        for item in requirements.clarifications
+        if earlier.get(_question_key(item.question)) != item.answer
+    ]
+    if not added:
+        return None
+    decisions = {_question_key(item.question): item for item in baseline.open_decisions}
+    applied: list[OpenDecision] = []
+    for index, item in enumerate(added, start=1):
+        match = decisions.get(_question_key(item.question))
+        applied.append(
+            OpenDecision(
+                id=match.id if match else f"A{index}",
+                question=item.question,
+                why=match.why if match else "A new clarification from the stakeholders.",
+                options=match.options if match else [],
+                components=(match.components if match else []) or ["requirements"],
+                answer=item.answer,
+            )
+        )
+    return applied
+
+
+def merge_clarifications(saved: list[Any], added: list[Any]) -> list[Any]:
+    """Answers add to the saved clarifications; a newer answer to the same question replaces it.
+
+    An entry without an answer (an unanswered question in decisions.yaml) is ignored.
+    """
+    merged: dict[str, Any] = {}
+    for item in [*saved, *added]:
+        if not isinstance(item, dict):
+            continue
+        question = " ".join(str(item.get("question") or "").split())
+        answer = str(item.get("answer") or "").strip()
+        if question and answer:
+            merged[question.lower()] = {"question": question, "answer": answer}
+    return list(merged.values())
+
+
 def run_generation(
     *,
     project: str,
@@ -283,7 +346,16 @@ def run_generation(
             )
         for path, text in raw_sources:
             store.save_source(path, text)
-        if edit_only:
+        answered = None if edit_only else answers_to_apply(baseline, requirements, scope)
+        if answered is not None and baseline is not None:
+            # Only answers changed: revise the last revision instead of designing it again.
+            design = baseline.model_copy(deep=True)
+            design.requirements = requirements
+            settled = {_question_key(item.question): item.answer for item in answered}
+            for decision in design.open_decisions:
+                if not decision.answer and _question_key(decision.question) in settled:
+                    decision.answer = settled[_question_key(decision.question)]
+        elif edit_only:
             if baseline is None:
                 raise ValueError("edit requires an existing accepted revision")
             design = baseline.model_copy(deep=True)
@@ -307,6 +379,9 @@ def run_generation(
             None if edit_only else team,
             progress,
             validator=lambda candidate: validate_design(candidate, build_graph(candidate), scope),
+            max_repair_passes=settings.max_repair_passes,
+            ask=getattr(interviewer, "decide", None) if interviewer is not None else None,
+            revise_with=answered,
         )
         try:
             result = supervisor.run()
@@ -351,19 +426,15 @@ def run_generation(
                 "calls": len(team.calls),
                 "input_tokens": sum(item.input_tokens or 0 for item in team.calls),
                 "output_tokens": sum(item.output_tokens or 0 for item in team.calls),
+                "cached_input_tokens": sum(item.cached_input_tokens or 0 for item in team.calls),
             }
         if errors:
             run_state.status = "failed"
             run_state.diagnostics = diagnostics
             store.save_run(run_state, input_snapshot)
             raise ValidationError("; ".join(item.message for item in errors))
-        valid_components = {
-            name
-            for name, state in design.components.items()
-            if state.status in {ComponentStatus.valid, ComponentStatus.not_applicable}
-        }
-        required = set(COMPONENTS) - COMPILED_COMPONENTS
-        complete = required <= valid_components
+        from archai.compilers.report import project_complete, revision_documents
+
         manifest = RevisionManifest(
             project=store.slug,
             revision=next_revision,
@@ -371,13 +442,12 @@ def run_generation(
             selected_scope=scope,
             design_sha256=sha256_bytes(json_bytes(design)),
             scope_valid=True,
-            project_complete=complete,
+            project_complete=project_complete(design),
             diagnostics=diagnostics,
             locks=locks,
             manual_decisions=store.load_manual_decisions(),
             run_id=run_state.id,
         )
-        from archai.compilers.report import revision_documents
 
         documents = revision_documents(design, graph, diagnostics, scope)
         store.commit_revision(design, graph, manifest, documents, base_revision)
@@ -445,8 +515,12 @@ def _prepare_requirements(
         )
         if baseline:
             baseline_data = baseline.requirements.model_dump(mode="json")
+            saved = list(baseline_data.get("clarifications") or [])
             baseline_data.update(
                 {key: value for key, value in data.items() if value not in (None, [], "")}
+            )
+            baseline_data["clarifications"] = merge_clarifications(
+                saved, data.get("clarifications") or []
             )
             data = baseline_data
     prose = [text for path, text in raw_sources if path.suffix.lower() in {".md", ".txt"}]
@@ -503,8 +577,18 @@ def _prepare_requirements(
                     )
     if interviewer is not None:
         try:
+            # Answers an earlier revision confirmed, even empty ones, are not asked again.
+            confirmed = (
+                frozenset(baseline.requirements.model_dump().keys())
+                if baseline is not None
+                else frozenset()
+            )
             data = interviewer.interview(
-                data, suggestions=suggestions, clarifying_questions=clarifying, persist=persist
+                data,
+                suggestions=suggestions,
+                clarifying_questions=clarifying,
+                persist=persist,
+                confirmed=confirmed,
             )
         except (InterviewPaused, KeyboardInterrupt, EOFError) as exc:
             run_state.status = "interviewing"

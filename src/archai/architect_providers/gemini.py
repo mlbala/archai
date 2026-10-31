@@ -63,6 +63,7 @@ class GeminiArchitectProvider:
                     value=value,
                     usage=Usage(
                         input_tokens=getattr(metadata, "prompt_token_count", None),
+                        cached_input_tokens=getattr(metadata, "cached_content_token_count", None),
                         output_tokens=(output_tokens or 0) + thoughts
                         if output_tokens is not None or thoughts
                         else None,

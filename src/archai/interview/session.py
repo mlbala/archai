@@ -89,6 +89,7 @@ class InterviewSession:
         clarifying_questions: list[str] | None = None,
         persist: Callable[[dict[str, Any]], None] | None = None,
         review: bool = True,
+        confirmed: frozenset[str] = frozenset(),
     ) -> None:
         self.io = io
         self.data = data
@@ -99,7 +100,8 @@ class InterviewSession:
         self.targets = {
             question.field
             for question in QUESTIONS
-            if field_unanswered(question, data) or question.field in self.suggestions
+            if (field_unanswered(question, data) and question.field not in confirmed)
+            or question.field in self.suggestions
         }
         answered = {
             str(item.get("question"))

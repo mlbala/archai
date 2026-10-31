@@ -6,7 +6,7 @@ from pathlib import Path
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ROLE_KEYS = ("requirements", "cloud", "api", "security", "verifier")
+ROLE_KEYS = ("requirements", "planner", "cloud", "api", "security", "verifier")
 PROVIDER_NAMES = ("openai", "anthropic", "gemini", "deepseek")
 
 
@@ -49,8 +49,10 @@ class Settings(BaseSettings):
     # Claude: effort for architecture work ("" sends none) and server-side refusal fallbacks.
     anthropic_effort: str = "high"
     anthropic_fallbacks: bool = True
-    max_generation_calls: int = 16
-    max_generation_tokens: int = 400_000
+    # A full design plus several repair rounds: each open finding calls its owning agent again.
+    max_generation_calls: int = 32
+    max_generation_tokens: int = 800_000
+    max_repair_passes: int = 4
     request_timeout_seconds: int = 300
 
 

@@ -20,8 +20,9 @@ def estimate_capacity(
     service_seconds: Decimal = Decimal("2"),
     parallel_jobs_per_worker: Decimal = Decimal("4"),
     target_utilization: Decimal = Decimal("0.7"),
+    attempts: Decimal = Decimal(1),
 ) -> CapacityResult:
-    calls_per_minute = requirements.peak_rps * 60 * requirements.model_calls_per_request
+    calls_per_minute = requirements.peak_rps * 60 * requirements.model_calls_per_request * attempts
     input_tpm = calls_per_minute * requirements.input_tokens
     output_tpm = calls_per_minute * requirements.output_tokens
     workers = (

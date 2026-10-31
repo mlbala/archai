@@ -163,3 +163,28 @@ def test_proposal_schemas_are_strict_and_inlinable():
     assert "$ref" not in str(schema)
     assert set(schema["required"]) == {"services", "data_stores", "infra", "decisions"}
     assert schema["additionalProperties"] is False
+
+
+def test_openai_sends_a_stable_cache_key_and_reports_cached_tokens():
+    from archai.architect_providers.base import cache_key
+
+    client = Mock()
+    client.responses.parse.return_value = SimpleNamespace(
+        status="completed",
+        output_parsed=Answer(value="hello"),
+        output=[],
+        usage=SimpleNamespace(
+            input_tokens=5000,
+            output_tokens=4,
+            input_tokens_details=SimpleNamespace(cached_tokens=3584),
+        ),
+    )
+    provider = OpenAIArchitectProvider("test-key", "test-model")
+    provider.client = client
+    stable = "instructions " * 400
+    first = provider.generate(stable + "\n# Context\nrun one", Answer)
+    provider.generate(stable + "\n# Context\nrun two", Answer)
+    keys = [call.kwargs["prompt_cache_key"] for call in client.responses.parse.call_args_list]
+    assert keys[0] == keys[1] == cache_key(stable + "\n# Context\nanything")
+    assert first.usage.cached_input_tokens == 3584
+    assert cache_key("short\n# Context\nx") != keys[0]

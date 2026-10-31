@@ -1,5 +1,6 @@
 import json
 import re
+import shlex
 
 from typer.testing import CliRunner
 
@@ -229,3 +230,115 @@ def test_setup_stores_secret_without_printing_it(tmp_path, monkeypatch):
     assert "ARCHAI_ARCHITECT_MODEL='custom-model'" in config.read_text()
     assert "ARCHAI_OPENAI_API_KEY='private-test-key'" in config.read_text()
     assert config.stat().st_mode & 0o777 == 0o600
+
+
+def test_open_review_findings_save_a_draft_instead_of_failing(
+    tmp_path, monkeypatch, requirements_file
+):
+    from conftest import FakeArchitect
+
+    stuck = {
+        "severity": "blocking",
+        "component": "api",
+        "fields": ["api_contracts"],
+        "same_as": "F1",
+        "issue": "Approval endpoint is missing an assignment filter",
+        "recommendation": "Filter by assignee",
+    }
+    fake = FakeArchitect({"VerificationReport": {"findings": [stuck]}})
+    monkeypatch.setattr(
+        "archai.application.service.create_provider", lambda settings, name, model: fake
+    )
+    monkeypatch.setenv("ARCHAI_OPENAI_API_KEY", "test-key")
+    result = runner.invoke(
+        app,
+        [
+            "auto",
+            "-p",
+            "draft",
+            "-f",
+            str(requirements_file),
+            "--architect-provider",
+            "openai",
+            "--non-interactive",
+            "--formats",
+            "core",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())
+    assert "Saved draft revision 1" in output
+    assert "Accepted revision" not in output
+    assert "Draft saved" in output
+    assert "1 review findings open" in output
+    assert "Approval endpoint is missing an assignment filter" in output
+    assert "arch api -p draft" in output
+
+
+def test_open_decisions_are_written_to_a_file_and_answered_with_update(
+    tmp_path, monkeypatch, requirements_file
+):
+    from conftest import FakeArchitect
+
+    from archai.persistence.store import ProjectStore
+
+    decision = {
+        "question": "Which ticket baseline defines the 30% reduction?",
+        "why": "It sets the release metric.",
+        "options": ["Last quarter", "Same quarter last year"],
+        "components": ["requirements"],
+    }
+    fake = FakeArchitect({"VerificationReport": {"findings": [], "decisions_needed": [decision]}})
+    monkeypatch.setattr(
+        "archai.application.service.create_provider", lambda settings, name, model: fake
+    )
+    monkeypatch.setenv("ARCHAI_OPENAI_API_KEY", "test-key")
+    common = ["--architect-provider", "openai", "--non-interactive", "--output-dir", str(tmp_path)]
+    first = runner.invoke(
+        app, ["auto", "-p", "kpi", "-f", str(requirements_file), "--formats", "core", *common]
+    )
+    assert first.exit_code == 0, first.output
+    decisions = tmp_path / "kpi" / "decisions.yaml"
+    assert decisions.exists()
+    output = " ".join(first.output.split())
+    assert f"arch update kpi --answers {shlex.quote(str(decisions))}" in output
+    text = decisions.read_text()
+    assert "Which ticket baseline defines the 30% reduction?" in text
+    assert "# Options: Last quarter | Same quarter last year" in text
+    before = ProjectStore(tmp_path, "kpi").load_design()
+    decisions.write_text(text.replace('answer: ""', 'answer: "Same quarter last year"'))
+
+    calls_before = len(fake.prompts)
+    second = runner.invoke(
+        app,
+        [
+            "update",
+            "kpi",
+            "--answers",
+            str(decisions),
+            "--non-interactive",
+            "--formats",
+            "core",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+    assert second.exit_code == 0, second.output
+    # Answers only: the last revision is revised, not designed again.
+    update_calls = [name for name, _ in fake.prompts[calls_before:]]
+    assert "ArchitecturePlanProposal" not in update_calls
+    assert "CloudSystemDataWorkflowRagInfraResilienceProposal" not in update_calls
+    repair = next(prompt for name, prompt in fake.prompts[calls_before:] if name == "PRDProposal")
+    assert "current_prd" in repair and "Same quarter last year" in repair
+    store = ProjectStore(tmp_path, "kpi")
+    codes = {item.code for item in store.load_manifest().diagnostics}
+    assert "ANSWERS_APPLIED" in codes
+    after = store.load_design()
+    assert after.open_decisions[0].answer == "Same quarter last year"
+    answers = {item.question: item.answer for item in after.requirements.clarifications}
+    assert answers["Which ticket baseline defines the 30% reduction?"] == "Same quarter last year"
+    assert after.requirements.idea == before.requirements.idea  # the description is kept
+    for item in before.requirements.clarifications:
+        assert answers[item.question] == item.answer  # earlier clarifications are kept

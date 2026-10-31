@@ -116,11 +116,15 @@ def source_label(source: str | None) -> str:
 
 def project_complete(design: EnterpriseDesign) -> bool:
     required = set(COMPONENTS) - COMPILED_COMPONENTS
-    return required <= {
+    components_ready = required <= {
         name
         for name, state in design.components.items()
         if state.status in {ComponentStatus.valid, ComponentStatus.not_applicable}
     }
+    open_blocking = any(
+        item.severity == "blocking" and not item.resolved for item in design.verification
+    )
+    return components_ready and not open_blocking
 
 
 def diagram_block(view: View, heading: str) -> list[str]:
@@ -203,11 +207,12 @@ def component_document(
     lines += [
         f"{h2} 1. Context and requirements",
         "",
-        f"- **Business outcome:** {cell(req.business_outcome)}",
     ]
-    for name in COMPONENT_CONTEXT.get(component, ()):
-        value = getattr(req, name, None)
-        lines.append(f"- **{name.replace('_', ' ').capitalize()}:** {cell(value)}")
+    context = [
+        f"- **{name.replace('_', ' ').capitalize()}:** {cell(getattr(req, name, None))}"
+        for name in COMPONENT_CONTEXT.get(component, ())
+    ]
+    lines += context or [f"- **Business outcome:** {cell(req.business_outcome)}"]
     lines += ["", f"{h2} 2. Design", ""]
     lines += _component_details(component, design, h3, include_scale=include_scale)
     selected = views_for(component, views if views is not None else all_views(design, graph))
@@ -240,23 +245,17 @@ def component_document(
     lines += ["", f"{h2} 6. Assumptions and limitations", ""]
     lines += _limitations(component, design)
     lines += ["", f"{h2} 7. Validation findings", ""]
-    relevant = [item for item in diagnostics if item.component == component]
-    findings = [item for item in design.verification if item.component == component]
+    relevant = [
+        item
+        for item in diagnostics
+        if item.component == component and item.code != "VERIFIER_UNRESOLVED"
+    ]
     if relevant:
         lines += table(
             ["Severity", "Code", "Message"],
             [[item.severity, f"`{item.code}`", item.message] for item in relevant],
         )
-    if findings:
-        lines += ["", "Cross-component verifier findings:", ""]
-        lines += table(
-            ["Severity", "Issue", "Recommendation", "Status"],
-            [
-                [f.severity, f.issue, f.recommendation, "resolved" if f.resolved else "open"]
-                for f in findings
-            ],
-        )
-    if not relevant and not findings:
+    else:
         lines.append("- No blocking diagnostics in this scope.")
     return "\n".join(lines) + "\n"
 
@@ -412,6 +411,11 @@ def _component_details(
                 for e in design.endpoints
             ],
         )
+        if any(endpoint.quota_status != "confirmed" for endpoint in design.endpoints):
+            lines.append(
+                "- RPM, TPM, and context limits are a planning envelope derived from the stated "
+                "traffic. Confirm the account quota before go-live."
+            )
         routing_policy = design.routing_policy
         if routing_policy:
             lines += ["", f"{h3} Routing policy", ""]
@@ -427,7 +431,9 @@ def _component_details(
     if component == "budget" and design.budget_policy:
         budget = design.budget_policy
         lines = [
-            f"- Hard monthly limit: **{budget.monthly_limit} {budget.currency}**",
+            f"- Model admission hard limit: **{budget.monthly_limit} {budget.currency}**",
+            "- This limit rejects new model calls. Platform cost is estimated separately and "
+            "is not part of it.",
             f"- Hierarchy: {' → '.join(budget.hierarchy)}",
             f"- Soft-limit alert: {cell(budget.soft_limit_percent)}%",
             f"- Per-request token ceiling: {cell(budget.per_request_token_ceiling)}",
@@ -620,7 +626,9 @@ def _component_details(
                 f"- Retry policy: {resilience.retry_policy} (owner: {resilience.retry_owner})",
                 f"- Circuit breaker: {resilience.circuit_breaker}",
                 f"- DR strategy: {resilience.dr_strategy}",
-                f"- RTO / RPO: {cell(resilience.rto_minutes)} min / {cell(resilience.rpo_minutes)} min",
+                f"- RTO / RPO: {cell(resilience.rto_minutes)} min / "
+                f"{cell(resilience.rpo_minutes)} min, for failures that can be restored inside "
+                f"{', '.join(design.requirements.data_residency) or design.requirements.region}",
                 "",
                 f"{h3} Timeouts",
                 "",
@@ -1077,25 +1085,52 @@ def complete_document(
     if "scale" in by_key:
         lines += ["", *diagram_block(by_key["scale"], "###")]
     lines += ["", "## Cross-component verification", ""]
-    if design.verification_summary:
-        lines += [design.verification_summary, ""]
-    if design.verification:
-        lines += table(
-            ["Severity", "Component", "Issue", "Recommendation", "Status"],
-            [
-                [
-                    f.severity,
-                    f.component,
-                    f.issue,
-                    f.recommendation,
-                    "resolved" if f.resolved else "open",
-                ]
-                for f in design.verification
-            ],
+    open_blocking = [
+        item for item in design.verification if item.severity == "blocking" and not item.resolved
+    ]
+    if open_blocking:
+        lines.append(
+            "This revision is partial. Open verifier findings are in the validation report, "
+            "not in this design."
         )
+    elif design.verification or design.verification_summary:
+        lines.append("No open blocking verifier findings are on this revision.")
     else:
         lines.append("- Deterministic cross-reference validation only (no model verifier ran).")
-    errors = [d for d in diagnostics if d.severity in {"error", "warning"}]
+    if design.acceptance:
+        passed = sum(1 for item in design.acceptance if item.status == "pass")
+        lines += [
+            "",
+            "### Acceptance criteria",
+            "",
+            f"{passed} of {len(design.acceptance)} criteria pass. The same criteria are checked on "
+            "every run; they come from the requirements and the PRD.",
+            "",
+        ]
+        lines += table(
+            ["ID", "Criterion", "Status", "Evidence"],
+            [[item.id, item.text, item.status, item.evidence or "—"] for item in design.acceptance],
+        )
+    if design.open_decisions:
+        lines += ["", "### Decisions for the stakeholders", ""]
+        lines += table(
+            ["ID", "Question", "Why it matters", "Options", "Answer"],
+            [
+                [
+                    item.id,
+                    item.question,
+                    item.why,
+                    "; ".join(item.options) or "—",
+                    item.answer or "open",
+                ]
+                for item in design.open_decisions
+            ],
+        )
+    errors = [
+        d
+        for d in diagnostics
+        if d.severity in {"error", "warning"} and d.code != "VERIFIER_UNRESOLVED"
+    ]
     if errors:
         lines += ["", "Deterministic diagnostics:", ""]
         lines += table(
@@ -1163,8 +1198,8 @@ def _highlights(design: EnterpriseDesign) -> list[str]:
         items.append(f"Identity: {design.identity_policy.idp} with {grants}")
     if design.budget_policy:
         items.append(
-            f"Hard budget {design.budget_policy.monthly_limit} {design.budget_policy.currency}"
-            "/month with durable reservations"
+            f"Model admission limit {design.budget_policy.monthly_limit} "
+            f"{design.budget_policy.currency}/month; platform cost is outside it"
         )
     if design.threats:
         items.append(f"{len(design.threats)} threats mapped to STRIDE and OWASP LLM Top 10 2025")

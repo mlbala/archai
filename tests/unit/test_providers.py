@@ -206,3 +206,24 @@ def test_model_use_show_and_clear_write_private_env(tmp_path, monkeypatch):
     listed = runner.invoke(app, ["model", "list", "deepseek"])
     assert "deepseek-v4-pro" in listed.output and "(default)" in listed.output
     assert json.loads(runner.invoke(app, ["doctor"]).output)["anthropic_configuration"] == "missing"
+
+
+def test_claude_caches_the_stable_instructions_and_counts_cache_reads():
+    message = claude_message('{"service":"SQS","kinds":[]}')
+    message.usage = SimpleNamespace(
+        input_tokens=50,
+        output_tokens=7,
+        cache_read_input_tokens=4000,
+        cache_creation_input_tokens=0,
+    )
+    client, calls = streaming_client(message)
+    provider = AnthropicArchitectProvider("key", "claude-haiku-5-5")
+    provider.client = client
+    prompt = "instructions " * 400 + "\n# Context\n<untrusted>{}</untrusted>"
+    result = provider.generate(prompt, Plan)
+    content = calls[0]["messages"][0]["content"]
+    assert content[0]["cache_control"] == {"type": "ephemeral"}
+    assert content[1]["text"].startswith("\n# Context\n")
+    assert "cache_control" not in content[1]
+    assert result.usage.input_tokens == 4050
+    assert result.usage.cached_input_tokens == 4000

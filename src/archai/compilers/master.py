@@ -111,11 +111,10 @@ def master_design_document(
         "",
         DISCLAIMER,
         "",
-        "This document is the delivery view of this revision: features, build order, and "
-        "sprint slices. The high-level design is the architecture picture. The low-level "
-        "design walks each hop. One document per component is in `documents/components/`. "
-        "A sprint is a build slice, not a calendar commitment. Dates and team size stay with "
-        "the people running the project.",
+        "Delivery view only: each feature is written once, then scheduled. The high-level "
+        "design is the architecture picture, the low-level design walks each hop, and "
+        "`documents/components/` holds one file per component. A sprint is a build slice, "
+        "not a calendar commitment.",
         "",
         "## 1. Feature catalog",
         "",
@@ -148,22 +147,14 @@ def master_design_document(
             for index, names in enumerate(_waves(design.services), start=1)
         ],
     )
-    lines += ["", "### Plan by component", ""]
-    lines += table(
-        ["Order", "Work", "Components", "Done when"],
-        [
-            [str(index), goal, _component_titles(design, names), _done_when(design, names)]
-            for index, (_title, goal, names) in enumerate(_active_sprints(design), start=1)
-        ],
-    )
     lines += ["", "## 3. Sprints", ""]
     for sprint_name, goal, names in _active_sprints(design):
         included = _present_names(design, names)
         owned = [item for item in features if item.sprint == sprint_name]
         lines += [f"### {sprint_name}", "", goal, ""]
         if owned:
-            lines.append("Features:")
-            lines += bullets(f"`{item.id}` {item.statement}" for item in owned)
+            lines.append("Features: " + ", ".join(f"`{item.id}`" for item in owned) + ".")
+            lines.append("The statement for each id is in the catalog above.")
             lines.append("")
         lines.append(f"Components: {_component_titles(design, included)}.")
         lines += ["", "Done when:", ""]
@@ -171,8 +162,13 @@ def master_design_document(
         lines.append("")
     lines += ["## 4. Decisions carried into the plan", ""]
     if design.decisions:
+        lines.append(
+            "Titles only. The decision text, rationale, and alternatives stay in the "
+            "matching component document."
+        )
+        lines.append("")
         lines += table(
-            ["ID", "Component", "Decision", "Rationale"],
+            ["ID", "Component", "Title"],
             [
                 [
                     item.id,
@@ -180,7 +176,6 @@ def master_design_document(
                     if item.component in COMPONENTS
                     else item.component,
                     item.title,
-                    item.decision,
                 ]
                 for item in design.decisions
             ],
@@ -403,11 +398,6 @@ def _component_titles(design: EnterpriseDesign, names: tuple[str, ...]) -> str:
     return ", ".join(COMPONENTS[name].title for name in names if name in COMPONENTS)
 
 
-def _done_when(design: EnterpriseDesign, names: tuple[str, ...]) -> str:
-    items = _done_items(design, names)
-    return " ".join(items)
-
-
 def _done_items(design: EnterpriseDesign, names: tuple[str, ...]) -> list[str]:
     req = design.requirements
     items: list[str] = []
@@ -437,8 +427,9 @@ def _done_items(design: EnterpriseDesign, names: tuple[str, ...]) -> list[str]:
         items.append(f"{len(design.workflows)} workflows name their steps and trigger.")
     if "budget" in selected and design.budget_policy:
         items.append(
-            f"The hard monthly limit is {design.budget_policy.monthly_limit} "
-            f"{design.budget_policy.currency}, enforced by reservation and settlement."
+            f"The model admission limit is {design.budget_policy.monthly_limit} "
+            f"{design.budget_policy.currency}. It rejects new model calls. "
+            "Platform cost is outside this limit."
         )
     if "cache" in selected and design.cache_policy:
         items.append("Cache namespaces are bound to tenant and permission scope.")
@@ -453,7 +444,8 @@ def _done_items(design: EnterpriseDesign, names: tuple[str, ...]) -> list[str]:
     if "resilience" in selected and design.resilience:
         items.append(
             f"Recovery targets are RTO {req.rto_minutes or '—'} minutes and "
-            f"RPO {req.rpo_minutes or '—'} minutes."
+            f"RPO {req.rpo_minutes or '—'} minutes for failures inside "
+            f"{', '.join(req.data_residency) or req.region}."
         )
     if "cost" in selected and design.capacity:
         items.append(

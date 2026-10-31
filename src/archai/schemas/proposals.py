@@ -187,6 +187,8 @@ class APIContractProposal(Proposal):
     path: str
     summary: str
     service_id: str
+    # How a caller authenticates this operation; "" means the user's OIDC bearer token.
+    auth: str
     scopes: list[str]
     streaming: bool
     rate_limit_rpm: int
@@ -202,6 +204,14 @@ class ModelAliasProposal(Proposal):
     primary_provider: str
     fallback_providers: list[str]
     quality_gate: str
+
+
+class EndpointProposal(Proposal):
+    provider: str
+    region: str
+    purpose: Literal["chat", "embedding"]
+    deployment_role: Literal["primary", "recovery"]
+    reason: str
 
 
 class RoutingPolicyProposal(Proposal):
@@ -348,19 +358,75 @@ class EvalProposal(Proposal):
     routes_covered: str
 
 
+# ---------------------------------------------------------------- chief architect (planner)
+
+
+class PlannedServiceProposal(Proposal):
+    id: str
+    name: str
+    kind: ServiceKind
+    purpose: str
+    depends_on: list[str]
+
+
+class PlannedInterfaceProposal(Proposal):
+    source: str
+    target: str
+    style: Literal["sync-http", "streaming", "async-queue", "event", "batch", "tool-call"]
+    purpose: str
+
+
+class PlannedChoiceProposal(Proposal):
+    component: str
+    choice: str
+    reason: str
+
+
+class ArchitecturePlanProposal(Proposal):
+    style: str
+    summary: str
+    services: list[PlannedServiceProposal]
+    interfaces: list[PlannedInterfaceProposal]
+    key_choices: list[PlannedChoiceProposal]
+    default_changes: list[PlannedChoiceProposal]
+    risks: list[str]
+
+
 # ---------------------------------------------------------------- role 5: verifier
 
 
 class FindingProposal(Proposal):
     severity: Literal["blocking", "warning", "info"]
     component: str
+    # Design fields the fix must change, e.g. "services.svc-retrieval.depends_on".
+    fields: list[str]
+    # Id of the earlier finding this one repeats, or "" when it is new.
+    same_as: str
     issue: str
     recommendation: str
 
 
+class CriterionResultProposal(Proposal):
+    id: str
+    status: Literal["pass", "fail"]
+    # The ids that show the criterion is met, or what is missing when it is not.
+    evidence: str
+    fields: list[str]
+    recommendation: str
+
+
+class DecisionNeededProposal(Proposal):
+    question: str
+    why: str
+    options: list[str]
+    components: list[str]
+
+
 class VerificationReport(Proposal):
     summary: str
+    criteria: list[CriterionResultProposal]
     findings: list[FindingProposal]
+    decisions_needed: list[DecisionNeededProposal]
 
 
 # ---------------------------------------------------------------- per-component proposal fields
@@ -382,23 +448,31 @@ COMPONENT_FIELDS: dict[str, tuple[str, Any]] = {
     "observe": ("observability", ObservabilityProposal),
     "eval": ("evaluation", EvalProposal),
 }
-EXTRA_FIELDS: dict[str, tuple[str, Any]] = {
-    "routing": ("model_aliases", list[ModelAliasProposal]),
+EXTRA_FIELDS: dict[str, list[tuple[str, Any]]] = {
+    "routing": [
+        ("model_aliases", list[ModelAliasProposal]),
+        # Deployments to add beyond existing_design.endpoints; empty when none are needed.
+        ("endpoints", list[EndpointProposal]),
+    ],
 }
 
 
-def scoped_proposal_model(role: str, components: list[str]) -> type[Proposal]:
-    """Build a proposal schema containing only the selected components' fields."""
+def scoped_proposal_model(role: str, components: list[str], patch: bool = False) -> type[Proposal]:
+    """Build a proposal schema containing only the selected components' fields.
+
+    ``patch`` adds ``remove_ids`` for repairs, which return only the items they change.
+    """
     fields: dict[str, Any] = {}
     for component in components:
         if component not in COMPONENT_FIELDS:
             continue
         name, annotation = COMPONENT_FIELDS[component]
         fields[name] = (annotation, ...)
-        if component in EXTRA_FIELDS:
-            extra_name, extra_annotation = EXTRA_FIELDS[component]
+        for extra_name, extra_annotation in EXTRA_FIELDS.get(component, []):
             fields[extra_name] = (extra_annotation, ...)
     fields["decisions"] = (list[DecisionProposal], ...)
+    if patch:
+        fields["remove_ids"] = (list[str], ...)
     model_name = "".join(part.title() for part in [role, *components]) + "Proposal"
     model: type[Proposal] = create_model(model_name, __base__=Proposal, **fields)
     return model
