@@ -1,0 +1,13 @@
+flowchart TD
+  describe["You describe the application"] --> interview["ArchAI interviews you for what is still open"]
+  interview --> baseline["A deterministic baseline is written for every part in scope"]
+  baseline --> prd["Enterprise Requirements Architect writes the PRD"]
+  prd --> cloud["Cloud, Data, and Resilience Architect<br/>services, data, workflows, retrieval, infrastructure, resilience"]
+  cloud --> api["API Management and AI Routing Architect<br/>APIs, model routing, budget, cache"]
+  api --> security["Identity, Security, and Observability Architect<br/>identity, guardrails, threats, observability, evaluation"]
+  security --> verify{"Design Verifier and Compiler<br/>blocking findings?"}
+  verify -->|"yes, at most twice"| revise["The owning architects revise those parts"]
+  revise --> verify
+  verify -->|clear| cost["Capacity and cost are computed in code"]
+  cost --> revision["An immutable revision is saved"]
+  revision --> review["You review documents, diagrams, policies, and infrastructure"]
