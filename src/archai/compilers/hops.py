@@ -240,13 +240,13 @@ def request_sequence(design: EnterpriseDesign) -> SequenceSpec:
             _step(
                 "app",
                 "adm",
-                f"Reserve against {budget.monthly_limit} {budget.currency} hard limit",
+                f"Reserve model spend against {budget.monthly_limit} {budget.currency}",
                 owner=_owner(admission, "adm"),
                 interface="POST /internal/budget/reservations",
                 payload=("alias", "token_bound", "principal", "reservation_id"),
                 data=ledger,
                 failure=(
-                    f"409 if over {budget.monthly_limit} {budget.currency}; "
+                    f"409 if model spend would pass {budget.monthly_limit} {budget.currency}; "
                     f"{budget.unavailable_behavior} when the ledger is unavailable."
                 ),
             )

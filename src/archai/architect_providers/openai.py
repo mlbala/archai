@@ -5,7 +5,7 @@ from typing import Any
 import openai
 from pydantic import BaseModel, ValidationError
 
-from archai.architect_providers.base import SYSTEM_INSTRUCTION, StructuredResult, Usage
+from archai.architect_providers.base import SYSTEM_INSTRUCTION, StructuredResult, Usage, cache_key
 from archai.errors import ProviderError
 
 
@@ -34,6 +34,7 @@ class OpenAIArchitectProvider:
                         {"role": "user", "content": current_prompt},
                     ],
                     text_format=output_type,
+                    prompt_cache_key=cache_key(prompt),
                 )
                 if response.status == "incomplete":
                     raise ProviderError(
@@ -49,11 +50,13 @@ class OpenAIArchitectProvider:
                     )
                 value = output_type.model_validate(response.output_parsed.model_dump())
                 usage: Any = response.usage
+                details: Any = getattr(usage, "input_tokens_details", None)
                 return StructuredResult(
                     value=value,
                     usage=Usage(
                         input_tokens=getattr(usage, "input_tokens", None),
                         output_tokens=getattr(usage, "output_tokens", None),
+                        cached_input_tokens=getattr(details, "cached_tokens", None),
                     ),
                 )
             except ValidationError as exc:

@@ -113,6 +113,7 @@ class DeepSeekArchitectProvider:
                 usage=Usage(
                     input_tokens=getattr(usage, "prompt_tokens", None),
                     output_tokens=getattr(usage, "completion_tokens", None),
+                    cached_input_tokens=getattr(usage, "prompt_cache_hit_tokens", None),
                 ),
             )
         raise ProviderError(f"DeepSeek schema repair exhausted: {last_error}", kind="schema_error")

@@ -1,0 +1,47 @@
+idea: >
+  A small internal handbook assistant for one team. People ask questions in a
+  web app. Answers come from one shared handbook PDF. The assistant may open a
+  ticket in an internal API only after a person approves that exact action.
+  Keep the system small: one region, one model provider, one environment, and
+  the smallest practical services.
+business_outcome: >
+  Help a small team find handbook answers and file approved tickets while
+  staying inside a 100 USD monthly model budget.
+users:
+  - Team members
+archetypes:
+  - enterprise-rag
+  - tool-using-agent
+user_roles:
+  - reader
+  - approver
+client_channels:
+  - web app
+tool_side_effects: approval
+excluded_components: []
+integrations:
+  - internal REST API
+data_sources:
+  - handbook PDF
+documents_per_day: 5
+avg_rps: 0.02
+peak_rps: 0.1
+input_tokens: 600
+output_tokens: 150
+model_calls_per_request: 1
+allowed_target_providers:
+  - Azure OpenAI
+topology: single-cloud
+profile: azure-aca
+region: eastus
+data_residency:
+  - eastus
+identity_provider: Entra ID
+tenant_isolation: single
+data_classification: internal
+availability_target: 99
+latency_p95_ms: 8000
+rto_minutes: 240
+rpo_minutes: 60
+currency: USD
+monthly_budget: 100

@@ -12,6 +12,7 @@ from archai.architect_providers.base import (
     StructuredResult,
     Usage,
     inline_json_schema,
+    split_cacheable,
 )
 from archai.errors import ProviderError
 
@@ -48,7 +49,16 @@ class AnthropicArchitectProvider:
         output_config: dict[str, Any] = {"format": {"type": "json_schema", "schema": schema}}
         if self.effort:
             output_config["effort"] = self.effort
-        messages: list[Any] = [{"role": "user", "content": prompt}]
+        stable, data = split_cacheable(prompt)
+        content: Any = (
+            [
+                {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": data},
+            ]
+            if stable
+            else prompt
+        )
+        messages: list[Any] = [{"role": "user", "content": content}]
         if self.fallbacks and self.model in FALLBACK_MODELS:
             with self.client.beta.messages.stream(
                 model=self.model,
@@ -105,11 +115,15 @@ class AnthropicArchitectProvider:
                 )
                 continue
             usage: Any = message.usage
+            read = getattr(usage, "cache_read_input_tokens", None) or 0
+            written = getattr(usage, "cache_creation_input_tokens", None) or 0
+            fresh = getattr(usage, "input_tokens", None)
             return StructuredResult(
                 value=value,
                 usage=Usage(
-                    input_tokens=getattr(usage, "input_tokens", None),
+                    input_tokens=None if fresh is None else fresh + read + written,
                     output_tokens=getattr(usage, "output_tokens", None),
+                    cached_input_tokens=read or None,
                 ),
             )
         raise ProviderError(f"Claude schema repair exhausted: {last_error}", kind="schema_error")

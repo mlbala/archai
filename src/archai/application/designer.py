@@ -7,11 +7,19 @@ that model proposals are merged onto. It derives every choice from requirements 
 from __future__ import annotations
 
 import copy
+import re
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Any, Literal
 
 from archai.application.registry import COMPILED_COMPONENTS, COMPONENTS
 from archai.domain.cost import estimate_capacity, estimate_cost
-from archai.domain.geography import endpoint_region, geography
+from archai.domain.geography import (
+    REGION_GEOGRAPHY,
+    endpoint_region,
+    geography,
+    provider_cloud,
+    region_cloud,
+)
 from archai.schemas.models import (
     APIContract,
     ArchitectureDecision,
@@ -143,59 +151,169 @@ def slug_id(value: str, prefix: str) -> str:
 # ---------------------------------------------------------------- endpoints
 
 
-def _endpoint(provider: str, requirements: RequirementsSpec, index: int) -> TargetEndpoint:
+def _endpoint(
+    provider: str,
+    requirements: RequirementsSpec,
+    index: int,
+    region: str | None = None,
+    role: Literal["primary", "recovery"] = "primary",
+) -> TargetEndpoint:
+    base = f"endpoint-{provider.lower().replace(' ', '-')}-{index}"
     return TargetEndpoint(
-        id=f"endpoint-{provider.lower().replace(' ', '-')}-{index}",
+        id=base if region is None else f"{base}-{region}",
         provider=provider,
         deployment_id=f"USER_SUPPLIED_{provider.upper().replace(' ', '_')}_DEPLOYMENT",
-        region=endpoint_region(provider, requirements.data_residency),
+        region=region or endpoint_region(provider, requirements.data_residency),
         modalities=["text"],
         supports_tools=uses_tools(requirements),
         supports_schema=True,
         context_limit=128_000,
         input_price_per_million=None,
         output_price_per_million=None,
-        rpm=max(60, int(requirements.peak_rps * 60 * requirements.model_calls_per_request)),
-        tpm=max(
-            10_000,
-            int(
-                requirements.peak_rps
-                * 60
-                * requirements.model_calls_per_request
-                * (requirements.input_tokens + requirements.output_tokens)
-            ),
-        ),
+        quota_status="planning",
+        deployment_role=role,
+        rpm=_planning_chat_rpm(requirements),
+        tpm=_planning_chat_tpm(requirements),
     )
 
 
-def _embedding_endpoint(provider: str, requirements: RequirementsSpec) -> TargetEndpoint:
-    base = provider.lower().replace(" ", "-")
+def _embedding_endpoint(
+    provider: str,
+    requirements: RequirementsSpec,
+    region: str | None = None,
+    role: Literal["primary", "recovery"] = "primary",
+) -> TargetEndpoint:
+    base = f"endpoint-{provider.lower().replace(' ', '-')}-embedding"
     return TargetEndpoint(
-        id=f"endpoint-{base}-embedding",
+        id=base if region is None else f"{base}-{region}",
         provider=provider,
         deployment_id=f"USER_SUPPLIED_{provider.upper().replace(' ', '_')}_EMBEDDING_DEPLOYMENT",
-        region=endpoint_region(provider, requirements.data_residency),
+        region=region or endpoint_region(provider, requirements.data_residency),
         modalities=["embeddings"],
         supports_tools=False,
         supports_schema=False,
         context_limit=8_000,
-        rpm=600,
-        tpm=max(100_000, (requirements.documents_per_day or 500) * 2_000 // 60),
+        quota_status="planning",
+        deployment_role=role,
+        rpm=_EMBEDDING_RPM,
+        tpm=_planning_embedding_tpm(requirements),
     )
 
 
+def recovery_region(provider: str, req: RequirementsSpec) -> str | None:
+    """The allowed region a provider's standby deployment uses under application-dr."""
+    if req.topology != "application-dr":
+        return None
+    primary = endpoint_region(provider, req.data_residency)
+    cloud = provider_cloud(provider)
+    for region in dict.fromkeys(req.data_residency):
+        if region != primary and (cloud is None or region_cloud(region) in {cloud, None}):
+            return region
+    return None
+
+
 def target_endpoints(req: RequirementsSpec) -> list[TargetEndpoint]:
+    """Default deployments: one per allowed provider, plus standbys for application-dr."""
     endpoints = [
         _endpoint(provider, req, index)
         for index, provider in enumerate(req.allowed_target_providers, start=1)
     ]
-    if has_rag(req) and req.allowed_target_providers:
+    rag = has_rag(req) and bool(req.allowed_target_providers)
+    if rag:
         endpoints.append(_embedding_endpoint(req.allowed_target_providers[0], req))
+    for index, provider in enumerate(req.allowed_target_providers, start=1):
+        region = recovery_region(provider, req)
+        if region is None:
+            continue
+        endpoints.append(_endpoint(provider, req, index, region, "recovery"))
+        if rag and index == 1:
+            endpoints.append(_embedding_endpoint(provider, req, region, "recovery"))
     return endpoints
 
 
+def proposed_endpoint(
+    req: RequirementsSpec, existing: list[TargetEndpoint], item: Any
+) -> tuple[TargetEndpoint | None, str | None]:
+    """Check an endpoint a role proposed; return it, or the reason it was not accepted."""
+    wanted = item.provider.strip().lower()
+    provider = next(
+        (
+            name
+            for name in req.allowed_target_providers
+            if name.lower() == wanted or name.lower() in wanted or wanted in name.lower()
+        ),
+        None,
+    )
+    if provider is None:
+        return None, f"{item.provider} is not an allowed target provider"
+    allowed = {region.lower(): region for region in req.data_residency}
+    region = allowed.get(item.region.strip().lower())
+    if region is None:
+        return None, (f"{item.region} is outside data residency ({', '.join(req.data_residency)})")
+    if item.deployment_role == "recovery" and req.topology != "application-dr":
+        return None, "a recovery deployment needs the application-dr topology"
+    if item.purpose == "embedding" and not has_rag(req):
+        return None, "an embedding deployment needs retrieval in scope"
+    index = req.allowed_target_providers.index(provider) + 1
+    endpoint = (
+        _embedding_endpoint(provider, req, region, item.deployment_role)
+        if item.purpose == "embedding"
+        else _endpoint(provider, req, index, region, item.deployment_role)
+    )
+    same = [
+        other
+        for other in existing
+        if other.provider == endpoint.provider
+        and other.region == endpoint.region
+        and other.modalities == endpoint.modalities
+        and other.deployment_role == endpoint.deployment_role
+    ]
+    return (None, None) if same else (endpoint, None)
+
+
+_REGION_NAMES = sorted(REGION_GEOGRAPHY, key=len, reverse=True)
+
+
+def regions_outside(text: str, residency: list[str]) -> list[str]:
+    """Cloud regions named in text that are not in the allowed residency list."""
+    allowed = {region.lower() for region in residency}
+    found: list[str] = []
+    for name in _REGION_NAMES:
+        if name in allowed or name in found:
+            continue
+        if re.search(rf"(?<![a-z0-9-]){re.escape(name)}(?![a-z0-9-])", text, re.IGNORECASE):
+            found.append(name)
+    return found
+
+
 def chat_endpoints(design: EnterpriseDesign) -> list[TargetEndpoint]:
-    return [item for item in design.endpoints if "embeddings" not in item.modalities]
+    return [
+        item
+        for item in design.endpoints
+        if "embeddings" not in item.modalities and item.deployment_role == "primary"
+    ]
+
+
+def attach_recovery_endpoints(design: EnterpriseDesign) -> bool:
+    """Point each alias at the standby deployments of its own provider and modality."""
+    by_id = {item.id: item for item in design.endpoints}
+    recovery = [item for item in design.endpoints if item.deployment_role == "recovery"]
+    changed = False
+    for alias in design.model_aliases:
+        primary = by_id.get(alias.endpoint_ids[0]) if alias.endpoint_ids else None
+        wanted = (
+            [
+                item.id
+                for item in recovery
+                if item.provider == primary.provider and item.modalities == primary.modalities
+            ]
+            if primary is not None
+            else []
+        )
+        if alias.recovery_endpoint_ids != wanted:
+            alias.recovery_endpoint_ids = wanted
+            changed = True
+    return changed
 
 
 # ---------------------------------------------------------------- scope application
@@ -337,6 +455,70 @@ def baseline_component(design: EnterpriseDesign, name: str) -> None:
 # ---------------------------------------------------------------- component builders
 
 
+_EMBEDDING_RPM = 600
+_EMBEDDING_TOKENS_PER_DOCUMENT = 2_000
+_DEFAULT_DOCUMENTS_PER_DAY = 500
+
+
+def _planning_embedding_tpm(requirements: RequirementsSpec) -> int:
+    """Embedding tokens per minute if a day's documents are indexed within one hour."""
+    documents = requirements.documents_per_day or _DEFAULT_DOCUMENTS_PER_DAY
+    return max(100_000, documents * _EMBEDDING_TOKENS_PER_DOCUMENT // 60)
+
+
+def _quantity(value: Decimal) -> int | float:
+    return int(value) if value == value.to_integral_value() else float(round(value, 2))
+
+
+def planning_capacity(req: RequirementsSpec) -> dict[str, Any]:
+    """Peak model demand and endpoint planning limits, computed once for every role."""
+    first = req.peak_rps * 60 * req.model_calls_per_request
+    peak = estimate_capacity(req, attempts=Decimal(MODEL_ATTEMPTS))
+    capacity: dict[str, Any] = {
+        "peak_model_calls_per_minute": _quantity(first),
+        "peak_dispatches_per_minute_with_retries": _quantity(peak.calls_per_minute),
+        "peak_input_tokens_per_minute": _quantity(peak.input_tokens_per_minute),
+        "peak_output_tokens_per_minute": _quantity(peak.output_tokens_per_minute),
+        "peak_total_tokens_per_minute": _quantity(
+            peak.input_tokens_per_minute + peak.output_tokens_per_minute
+        ),
+        "chat_endpoint_rpm": _planning_chat_rpm(req),
+        "chat_endpoint_tpm": _planning_chat_tpm(req),
+        "basis": f"Worst case at peak_rps: every model call uses all {MODEL_ATTEMPTS} attempts "
+        "at the average token sizes. Endpoint RPM and TPM are those figures with a floor of "
+        "60 RPM and 10,000 TPM.",
+    }
+    if has_rag(req):
+        capacity["embedding_endpoint_rpm"] = _EMBEDDING_RPM
+        capacity["embedding_endpoint_tpm"] = _planning_embedding_tpm(req)
+        capacity["embedding_basis"] = (
+            f"documents_per_day (or {_DEFAULT_DOCUMENTS_PER_DAY} when not stated) × "
+            f"{_EMBEDDING_TOKENS_PER_DOCUMENT:,} tokens per document, indexed within one hour, "
+            "with a floor of 100,000 TPM. The RPM is a fixed planning value."
+        )
+    return capacity
+
+
+def _planning_chat_rpm(requirements: RequirementsSpec) -> int:
+    return max(
+        60,
+        int(requirements.peak_rps * 60 * requirements.model_calls_per_request * MODEL_ATTEMPTS),
+    )
+
+
+def _planning_chat_tpm(requirements: RequirementsSpec) -> int:
+    return max(
+        10_000,
+        int(
+            requirements.peak_rps
+            * 60
+            * requirements.model_calls_per_request
+            * (requirements.input_tokens + requirements.output_tokens)
+            * MODEL_ATTEMPTS
+        ),
+    )
+
+
 def _system(design: EnterpriseDesign, req: RequirementsSpec) -> None:
     rag = has_rag(req)
     tools = uses_tools(req)
@@ -375,7 +557,7 @@ def _system(design: EnterpriseDesign, req: RequirementsSpec) -> None:
             technology=f"Python/FastAPI on {compute}",
             scaling="HTTP concurrency autoscaling; stateless replicas",
             responsibilities=_app_responsibilities(rag, tools, jobs),
-            exposes=_app_exposes(rag, jobs),
+            exposes=_app_exposes(rag, jobs, tools and req.tool_side_effects == "approval"),
             depends_on=app_dependencies,
             data_owned=["store-state"],
         ),
@@ -548,14 +730,175 @@ def _app_responsibilities(rag: bool, tools: bool, jobs: bool) -> list[str]:
     return items
 
 
-def _app_exposes(rag: bool, jobs: bool) -> list[str]:
+def _app_exposes(rag: bool, jobs: bool, approvals: bool = False) -> list[str]:
     items = ["chat", "conversations"]
     if jobs:
         items.append("jobs")
     if rag:
         items.append("documents")
+    if approvals:
+        items.append("approvals")
     items.append("feedback")
     return items
+
+
+MODEL_ATTEMPTS = 2
+INGESTION_SCOPE = "ingestion"
+RESERVE_SCOPE = "model-reserve"
+_INGESTION_SHARE = Decimal("25")
+_RESERVE_SHARE = Decimal("10")
+# Decisions with this source restate values taken from the requirements; roles do not edit them.
+FIXED_SOURCE = "fixed from requirements"
+OPERATING_SPEND_NOTE = (
+    "Platform, data, and other operating spend are outside this limit and need their own "
+    "forecast. Rejecting a model call does not enforce that forecast."
+)
+
+
+def model_budget_rationale(req: RequirementsSpec) -> str:
+    """State the one model ceiling and what its shares are allowed to cover."""
+    if has_rag(req):
+        shares = (
+            "Shares divide that model spend across the stated user groups, document "
+            "ingestion, and a reserve."
+        )
+    else:
+        shares = "Shares divide that model spend across the stated user groups and a reserve."
+    return (
+        "The hard limit rejects new model calls. It is not a cap on platform or other "
+        f"operating spend. {shares} Release requires a forecast of the remaining operating "
+        "spend. Rejecting a model call does not enforce that forecast."
+    )
+
+
+def default_model_allocations(req: RequirementsSpec) -> list[BudgetAllocation]:
+    """Baseline split of the model ceiling: user groups, ingestion when needed, and a reserve."""
+    users = [item.strip() for item in req.users if item.strip()][:6] or ["application"]
+    ingestion = has_rag(req)
+    ingest = _INGESTION_SHARE if ingestion else Decimal(0)
+    pool = Decimal(100) - _RESERVE_SHARE - ingest
+    share = (pool / len(users)).quantize(Decimal("0.01"), ROUND_HALF_UP)
+    shares = [share for _ in users]
+    used = sum(shares, Decimal(0)) + ingest + _RESERVE_SHARE
+    shares[-1] = (shares[-1] + (Decimal(100) - used)).quantize(Decimal("0.01"), ROUND_HALF_UP)
+    allocations = [
+        BudgetAllocation(scope=f"department:{group}", share_percent=portion, amount=Decimal(0))
+        for group, portion in zip(users, shares, strict=True)
+    ]
+    if ingestion:
+        allocations.append(
+            BudgetAllocation(scope=INGESTION_SCOPE, share_percent=ingest, amount=Decimal(0))
+        )
+    allocations.append(
+        BudgetAllocation(scope=RESERVE_SCOPE, share_percent=_RESERVE_SHARE, amount=Decimal(0))
+    )
+    return allocations
+
+
+def recovery_strategy(req: RequirementsSpec) -> str:
+    """State the failure scope the RTO and RPO can cover inside data residency."""
+    regions = list(dict.fromkeys(req.data_residency or [req.region]))
+    inside = ", ".join(regions)
+    target = ""
+    if req.rto_minutes is not None and req.rpo_minutes is not None:
+        target = (
+            f" RTO {req.rto_minutes} minutes and RPO {req.rpo_minutes} minutes apply only to "
+            f"failures that can be restored inside {inside}."
+        )
+    elif req.rto_minutes is not None:
+        target = (
+            f" RTO {req.rto_minutes} minutes applies only to failures that can be restored "
+            f"inside {inside}."
+        )
+    accepted = (
+        " Loss of every allowed region is an accepted risk because failover would leave residency."
+    )
+    if req.topology == "application-dr" and len(regions) > 1:
+        body = (
+            "Warm standby across the allowed residency regions, with separate IaC roots, "
+            "data replication, budget authority, and traffic switching."
+        )
+    elif req.topology == "provider-failover":
+        body = (
+            "Model-provider failover only inside the allowed residency regions. "
+            "This is not application disaster recovery."
+        )
+    else:
+        body = f"Zone-redundant services in {inside}; restore from backups inside those regions."
+    return body + target + accepted
+
+
+def ensure_approval_operations(design: EnterpriseDesign) -> list[str]:
+    """Ensure an approval inbox and decision operation exist when side effects require approval.
+
+    Returns the contract ids that were added.
+    """
+    req = design.requirements
+    if req.tool_side_effects != "approval" or not uses_tools(req):
+        return []
+    app = next(
+        (
+            service
+            for service in design.services
+            if service.kind in {"application", "orchestration"}
+        ),
+        None,
+    )
+    # The approval paths reach the app's exposures through _align_public_surface. Adding a bare
+    # "approvals" entry here would undo a role that removed it.
+    service_id = app.id if app is not None else "svc-app"
+    existing = {(contract.method.upper(), contract.path) for contract in design.api_contracts}
+    auth = auth_scheme(req)
+    peak_rpm = max(60, int(req.peak_rps * 60))
+    added: list[str] = []
+    if ("GET", "/v1/approvals") not in existing:
+        design.api_contracts.append(
+            APIContract(
+                id="api-approvals",
+                path="/v1/approvals",
+                method="GET",
+                auth=auth,
+                summary=(
+                    "List pending tool actions assigned to the caller, re-checking source "
+                    "access before proposal details"
+                ),
+                service_id=service_id,
+                scopes=["approvals.read"],
+                rate_limit_rpm=peak_rpm,
+                request_fields=["assignee", "status", "page"],
+                response_fields=["approvals[]", "next_page"],
+            )
+        )
+        added.append("api-approvals")
+    if ("POST", "/v1/approvals/{approval_id}/decision") not in existing:
+        design.api_contracts.append(
+            APIContract(
+                id="api-approval",
+                path="/v1/approvals/{approval_id}/decision",
+                method="POST",
+                auth=auth,
+                summary="Approve or reject an exact pending tool action",
+                service_id=service_id,
+                scopes=["approvals.decide"],
+                rate_limit_rpm=120,
+                request_fields=["approval_id", "decision", "arguments_hash", "comment"],
+                response_fields=["status", "executed_at"],
+            )
+        )
+        added.append("api-approval")
+    if design.identity_policy is not None:
+        for role in design.identity_policy.roles:
+            lowered = role.name.lower()
+            if (
+                "approv" in lowered
+                or "finance" in lowered
+                or "approvals.decide" in role.permissions
+                or "approvals.read" in role.permissions
+            ):
+                for scope in ("approvals.read", "approvals.decide"):
+                    if scope not in role.permissions:
+                        role.permissions.append(scope)
+    return added
 
 
 def _state_purpose(req: RequirementsSpec) -> str:
@@ -642,21 +985,6 @@ def _api(design: EnterpriseDesign, req: RequirementsSpec) -> None:
                 response_fields=["document_id", "job_id"],
             )
         )
-    if uses_tools(req) and req.tool_side_effects == "approval":
-        contracts.append(
-            APIContract(
-                id="api-approval",
-                path="/v1/approvals/{approval_id}/decision",
-                method="POST",
-                auth=auth,
-                summary="Approve or reject an exact pending tool action",
-                service_id="svc-app",
-                scopes=["approvals.decide"],
-                rate_limit_rpm=120,
-                request_fields=["approval_id", "decision", "arguments_hash", "comment"],
-                response_fields=["status", "executed_at"],
-            )
-        )
     contracts.append(
         APIContract(
             id="api-feedback",
@@ -672,6 +1000,7 @@ def _api(design: EnterpriseDesign, req: RequirementsSpec) -> None:
         )
     )
     design.api_contracts = contracts
+    ensure_approval_operations(design)
     add_decision(
         design,
         "api",
@@ -741,25 +1070,16 @@ def _routing(design: EnterpriseDesign, req: RequirementsSpec) -> None:
 
 
 def _budget(design: EnterpriseDesign, req: RequirementsSpec) -> None:
-    groups = [item for item in req.users if item.strip()][:6] or ["application"]
-    reserve = Decimal("10")
-    share = ((Decimal(100) - reserve) / len(groups)).quantize(Decimal("0.01"), ROUND_HALF_UP)
-    allocations = [
-        BudgetAllocation(scope=f"department:{group}", share_percent=share, amount=Decimal(0))
-        for group in groups
-    ]
-    allocations.append(
-        BudgetAllocation(scope="platform-reserve", share_percent=reserve, amount=Decimal(0))
-    )
     design.budget_policy = BudgetPolicy(
         currency=req.currency,
         monthly_limit=req.monthly_budget,
         hard_limit=True,
-        allocations=allocations,
+        enforcement_scope="model-calls",
+        allocations=default_model_allocations(req),
         soft_limit_percent=80,
         per_request_token_ceiling=(req.input_tokens + req.output_tokens) * 4,
         per_workflow_step_ceiling=12,
-        rationale="Equal departmental shares with a platform reserve; adjust to business owners.",
+        rationale=model_budget_rationale(req),
     )
     compute_allocations(design.budget_policy)
     add_decision(
@@ -783,6 +1103,245 @@ def compute_allocations(policy: BudgetPolicy) -> None:
         item.amount = (policy.monthly_limit * item.share_percent / 100).quantize(
             Decimal("0.01"), ROUND_HALF_UP
         )
+
+
+def _money(amount: Decimal) -> str:
+    quantized = amount.quantize(Decimal("0.01"), ROUND_HALF_UP)
+    if quantized == quantized.to_integral_value():
+        return str(int(quantized))
+    return format(quantized, "f")
+
+
+def fixed_facts(req: RequirementsSpec) -> dict[str, Any]:
+    """Values ArchAI sets from the confirmed requirements.
+
+    Every role and the verifier receive these. A role must not restate a different value, and
+    a verifier finding that only disputes one of them is not sent back for repair.
+    """
+    regions = list(dict.fromkeys(req.data_residency or [req.region]))
+    facts: dict[str, Any] = {
+        "region": req.region,
+        "data_residency": regions,
+        "tenant_isolation": req.tenant_isolation,
+        "tool_side_effects": req.tool_side_effects,
+        "allowed_target_providers": req.allowed_target_providers,
+        "model_call_hard_limit": {
+            "amount": _money(req.monthly_budget),
+            "currency": req.currency,
+            "covers": "model calls only",
+            "when_reached": "new model calls are rejected",
+            "outside_the_limit": OPERATING_SPEND_NOTE,
+        },
+        "model_attempts": {
+            "maximum": MODEL_ATTEMPTS,
+            "retry_owner": "the AI gateway",
+            "rules": "The first call plus one retry. Each billable attempt is reserved before "
+            "dispatch, and planning RPM and TPM count both attempts. Queue and worker retries "
+            "never dispatch an extra model call.",
+        },
+        "endpoint_limits": "RPM, TPM, and context limits are a planning envelope derived from "
+        "the stated traffic, not an account quota.",
+        "traffic": {
+            "avg_rps": _quantity(req.avg_rps),
+            "peak_rps": _quantity(req.peak_rps),
+            "model_calls_per_request": _quantity(req.model_calls_per_request),
+            "input_tokens_per_model_call": req.input_tokens,
+            "output_tokens_per_model_call": req.output_tokens,
+            "meaning": "Token sizes are averages per model call from the requirements. They "
+            "are planning inputs, not per-request or per-call caps.",
+        },
+        "planning_capacity": {
+            **planning_capacity(req),
+            "rule": "Quote these numbers when a decision needs them. Do not recompute them "
+            "or state different ones.",
+        },
+    }
+    if req.documents_per_day is not None:
+        facts["traffic"]["documents_per_day"] = req.documents_per_day
+    if req.data_classification:
+        facts["data_classification"] = req.data_classification
+    if req.rto_minutes is not None or req.rpo_minutes is not None:
+        facts["recovery"] = {
+            "rto_minutes": req.rto_minutes,
+            "rpo_minutes": req.rpo_minutes,
+            "applies_to": f"failures that can be restored inside {', '.join(regions)}",
+        }
+    if req.tool_side_effects == "approval" and uses_tools(req):
+        facts["approval_operations"] = [
+            "GET /v1/approvals (approvals.read)",
+            "POST /v1/approvals/{approval_id}/decision (approvals.decide)",
+        ]
+    return facts
+
+
+def align_fixed_facts(design: EnterpriseDesign) -> list[tuple[str, str, str]]:
+    """Write the requirement-derived facts into the design so no component contradicts them.
+
+    Python owns these values. The decision records it writes restate them, so the documents
+    and the verifier read one statement of each fact instead of a model's paraphrase.
+    """
+    notes: list[tuple[str, str, str]] = []
+    if _align_model_attempts(design):
+        notes.append(
+            (
+                "ATTEMPT_LIMIT",
+                f"Model calls use one maximum of {MODEL_ATTEMPTS} attempts",
+                "routing",
+            )
+        )
+    if _align_public_surface(design):
+        notes.append(
+            (
+                "PUBLIC_SURFACE",
+                "The gateway and each owning service expose exactly the external operations "
+                "in the API contracts",
+                "api",
+            )
+        )
+    _write_fixed_decisions(design)
+    return notes
+
+
+def _decision_snapshot(
+    design: EnterpriseDesign,
+) -> tuple[tuple[str, str, str, str | None], ...]:
+    return tuple(
+        sorted(
+            (item.id, item.decision, item.rationale, item.consequences) for item in design.decisions
+        )
+    )
+
+
+def _write_fixed_decisions(design: EnterpriseDesign) -> bool:
+    before = _decision_snapshot(design)
+    req = design.requirements
+    policy = design.budget_policy
+    if policy is not None:
+        shares = "; ".join(
+            f"{item.scope} {_money(item.share_percent)}% ({policy.currency} {_money(item.amount)})"
+            for item in policy.allocations
+        )
+        add_decision(
+            design,
+            "budget",
+            "Model-call hard limit",
+            f"New model calls are rejected once {policy.currency} {_money(policy.monthly_limit)} "
+            "of model spend is reserved in a month."
+            + (f" Shares of that limit: {shares}." if shares else ""),
+            "The requirements set this hard monthly limit for model usage. ArchAI takes the "
+            "amount from the requirements; change the requirement to change it.",
+            [],
+            OPERATING_SPEND_NOTE,
+            source=FIXED_SOURCE,
+        )
+    if design.routing_policy is not None:
+        capacity = planning_capacity(req)
+        add_decision(
+            design,
+            "routing",
+            "Model attempt limit",
+            f"Every model call makes at most {MODEL_ATTEMPTS} attempts: the first call and one "
+            "retry, owned by the AI gateway. Each billable attempt is reserved before dispatch. "
+            f"At peak that is {capacity['peak_dispatches_per_minute_with_retries']:,} dispatches "
+            f"and {capacity['peak_total_tokens_per_minute']:,} tokens per minute "
+            f"({capacity['peak_input_tokens_per_minute']:,} input, "
+            f"{capacity['peak_output_tokens_per_minute']:,} output), so each chat endpoint is "
+            f"planned at {capacity['chat_endpoint_rpm']:,} RPM and "
+            f"{capacity['chat_endpoint_tpm']:,} TPM.",
+            "One maximum keeps retries, budget reservations, and capacity planning in agreement.",
+            [],
+            "Queue and worker retries are separate and never dispatch an extra model call.",
+            source=FIXED_SOURCE,
+        )
+    if design.resilience is not None:
+        add_decision(
+            design,
+            "resilience",
+            "Recovery scope",
+            recovery_strategy(req),
+            "RTO, RPO, and the allowed regions come from the requirements. Recovery cannot "
+            "move data outside those regions.",
+            [],
+            None,
+            source=FIXED_SOURCE,
+        )
+    return _decision_snapshot(design) != before
+
+
+def _align_model_attempts(design: EnterpriseDesign) -> bool:
+    changed = False
+    if design.routing_policy is not None and design.routing_policy.max_attempts != MODEL_ATTEMPTS:
+        design.routing_policy.max_attempts = MODEL_ATTEMPTS
+        changed = True
+    req = design.requirements
+    rpm = _planning_chat_rpm(req)
+    tpm = _planning_chat_tpm(req)
+    for endpoint in design.endpoints:
+        if "embeddings" in endpoint.modalities:
+            continue
+        if endpoint.rpm != rpm or endpoint.tpm != tpm:
+            endpoint.rpm = rpm
+            endpoint.tpm = tpm
+            changed = True
+    return changed
+
+
+_ROUTE = re.compile(r"^(?:(GET|POST|PUT|PATCH|DELETE)\s+)?(/\S*)$", re.IGNORECASE)
+# The same entry led by a contract id, as models often write it: "api-chat POST /v1/chat".
+_LABELLED_ROUTE = re.compile(
+    r"^[A-Za-z0-9][\w.-]*\s+(GET|POST|PUT|PATCH|DELETE)\s+(/\S*)$", re.IGNORECASE
+)
+_VERSIONED = re.compile(r"^/v\d+/")
+
+
+def _route(entry: str) -> tuple[str | None, str] | None:
+    """(method or None, path) of an entry such as "POST /v1/chat" or "api-chat POST /v1/chat"."""
+    text = entry.strip()
+    match = _ROUTE.match(text) or _LABELLED_ROUTE.match(text)
+    if not match:
+        return None
+    return (match.group(1).upper() if match.group(1) else None), match.group(2)
+
+
+def _align_public_surface(design: EnterpriseDesign) -> bool:
+    """Make the external surface equal the contract list, one "METHOD /path" entry per operation.
+
+    The gateway publishes every contract, and the service that owns a contract exposes it. A
+    versioned route with no contract, a bare path, or a gateway wildcard is removed, so dropping
+    a contract also takes it off the edge and every public route names its method.
+    """
+    contracts = [contract for contract in design.api_contracts if contract.path.startswith("/")]
+    operations = {(contract.method.upper(), contract.path) for contract in contracts}
+    owners = {contract.service_id for contract in contracts if contract.service_id}
+    gateway = next((service for service in design.services if service.kind == "gateway"), None)
+    changed = False
+    for service in design.services:
+        is_gateway = service is gateway
+        if not is_gateway and service.id not in owners:
+            continue
+        kept: list[str] = []
+        for item in service.exposes:
+            parsed = _route(item)
+            if parsed is not None:
+                method, path = parsed
+                wildcard = path.endswith("/*")
+                if is_gateway and wildcard:
+                    continue
+                if not wildcard and _VERSIONED.match(path):
+                    if method is None or (method, path) not in operations:
+                        continue
+                    item = f"{method} {path}"
+            if item not in kept:
+                kept.append(item)
+        for contract in contracts:
+            if is_gateway or contract.service_id == service.id:
+                entry = f"{contract.method.upper()} {contract.path}"
+                if entry not in kept:
+                    kept.append(entry)
+        if kept != service.exposes:
+            service.exposes = kept
+            changed = True
+    return changed
 
 
 def _cache(design: EnterpriseDesign, req: RequirementsSpec) -> None:
@@ -1191,14 +1750,7 @@ def _resilience(design: EnterpriseDesign, req: RequirementsSpec) -> None:
         )
     else:
         design.queue_policy = None
-    dr = {
-        "single-cloud": "Zone-redundant services in one region; restore from backups to a "
-        "secondary region by runbook",
-        "provider-failover": "Model-provider failover only; the application remains in its "
-        "hosting region. This is not application disaster recovery",
-        "application-dr": "Warm standby environment in a recovery region with separate IaC "
-        "roots, data replication, budget authority, and traffic switching",
-    }[req.topology]
+    dr = recovery_strategy(req)
     timeouts = [
         "Gateway → application: 120 s (streaming)",
         "Application → model admission: 5 s",
@@ -1222,8 +1774,12 @@ def _resilience(design: EnterpriseDesign, req: RequirementsSpec) -> None:
             "Retrieval unavailable → answer that sources are unavailable, no ungrounded answer"
         )
     design.resilience = ResiliencePlan(
-        retry_policy="AI gateway: one retry on timeout/429/5xx with jittered backoff, honouring "
-        "Retry-After and the request deadline",
+        retry_policy=(
+            "AI gateway: at most 2 attempts (the initial call and one retry) on timeout, 429, "
+            "or 5xx, with jittered backoff, Retry-After, and the request deadline. Each "
+            "billable attempt is reserved before dispatch. Queue and worker attempts do not "
+            "dispatch model calls."
+        ),
         retry_owner="ai-gateway",
         circuit_breaker="Per-endpoint closed/open/half-open; open after 5 failures in 30 s; "
         "half-open probe budget of 2 requests",
@@ -1307,7 +1863,7 @@ def _auth(design: EnterpriseDesign, req: RequirementsSpec) -> None:
                 "config.manage",
             ]
         elif "approv" in lowered or "finance" in lowered:
-            permissions = ["chat.invoke", "chat.read", "approvals.decide"]
+            permissions = ["chat.invoke", "chat.read", "approvals.read", "approvals.decide"]
         elif any(word in lowered for word in ("author", "editor", "curator", "content")):
             permissions = ["chat.invoke", "chat.read", "documents.write"]
         else:
@@ -1714,7 +2270,10 @@ def _eval(design: EnterpriseDesign, req: RequirementsSpec) -> None:
 
 
 def _cost(design: EnterpriseDesign, req: RequirementsSpec) -> None:
-    design.capacity = estimate_capacity(req)
+    attempts = Decimal(
+        design.routing_policy.max_attempts if design.routing_policy else MODEL_ATTEMPTS
+    )
+    design.capacity = estimate_capacity(req, attempts=attempts)
     chat = chat_endpoints(design)
     if chat:
         design.costs = [

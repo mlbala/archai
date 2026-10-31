@@ -10,20 +10,26 @@ import re
 from decimal import Decimal
 from functools import cache
 from importlib.resources import files
-from itertools import pairwise
-from typing import Any
+from typing import Any, get_origin
 
 import yaml
 from pydantic import BaseModel
 
 from archai.application import designer
+from archai.application.derive import derive_all
 from archai.application.designer import (
     REQUIRED_CACHE_NAMESPACE,
     REQUIRED_CLAIMS,
     REQUIRED_CORRELATION_IDS,
     add_decision,
+    align_fixed_facts,
+    attach_recovery_endpoints,
     compute_allocations,
+    ensure_approval_operations,
     has_rag,
+    proposed_endpoint,
+    recovery_strategy,
+    regions_outside,
     slug_id,
     target_endpoints,
     uses_tools,
@@ -56,6 +62,14 @@ from archai.schemas.models import (
     Threat,
     ValidationDiagnostic,
     Workflow,
+)
+from archai.schemas.proposals import (
+    APIContractProposal,
+    DataStoreProposal,
+    GuardrailProposal,
+    ServiceProposal,
+    ThreatProposal,
+    WorkflowProposal,
 )
 
 OWNER_BY_KIND = {
@@ -140,13 +154,61 @@ def _clean(values: list[str], limit: int = 12) -> list[str]:
     return seen[:limit]
 
 
-class ProposalMerger:
-    """Merge one role proposal; ``aliases`` maps proposed IDs to normalized canonical IDs."""
+# Components whose content is a list of items with ids. A repair (patch mode) returns only the
+# items it adds or changes; the others are kept, and remove_ids deletes items by id.
+PATCH_LISTS: dict[str, tuple[str, type[BaseModel], str]] = {
+    "system": ("services", ServiceProposal, "svc-"),
+    "data": ("data_stores", DataStoreProposal, "store-"),
+    "workflow": ("workflows", WorkflowProposal, "workflow-"),
+    "api": ("api_contracts", APIContractProposal, "api-"),
+    "guard": ("guardrails", GuardrailProposal, "guard-"),
+    "security": ("threats", ThreatProposal, "threat-"),
+}
 
-    def __init__(self, design: EnterpriseDesign, source: str) -> None:
+
+def _as_proposal(item: BaseModel, kind: type[BaseModel]) -> Any:
+    """Re-express a stored item as the proposal it would have come from, for re-merging."""
+    data = item.model_dump()
+    values: dict[str, Any] = {}
+    for name, info in kind.model_fields.items():
+        value = data.get(name)
+        if value is None:
+            if get_origin(info.annotation) is list:
+                value = []
+            elif info.annotation is int:
+                value = 0
+            elif info.annotation is bool:
+                value = False
+            else:
+                value = ""
+        values[name] = value
+    return kind.model_construct(**values)
+
+
+def _item_key(item: Any, prefix: str) -> str:
+    if prefix == "api-":
+        raw = item.id or f"{item.method}-{item.path}"
+    elif prefix == "guard-":
+        raw = item.id or f"{item.stage}-{item.control}"
+    elif prefix == "threat-":
+        raw = item.id or item.title
+    else:
+        raw = item.id or item.name
+    return slug_id(raw, prefix)
+
+
+class ProposalMerger:
+    """Merge one role proposal; ``aliases`` maps proposed IDs to normalized canonical IDs.
+
+    In patch mode (repairs), list components and decisions are edited in place: returned items
+    replace the items with the same id, other items are kept, and ``remove_ids`` deletes items.
+    """
+
+    def __init__(self, design: EnterpriseDesign, source: str, patch: bool = False) -> None:
         self.design = design
         self.req = design.requirements
         self.source = source
+        self.patch = patch
         self.aliases: dict[str, str] = {}
         self.diagnostics: list[ValidationDiagnostic] = []
 
@@ -188,6 +250,7 @@ class ProposalMerger:
             "eval": ("evaluation", self.evaluation),
         }
         merged: list[str] = []
+        removals = [str(item) for item in getattr(proposal, "remove_ids", []) or []]
         for component in ordered:
             if component not in components or component not in handlers:
                 continue
@@ -195,13 +258,49 @@ class ProposalMerger:
             value = getattr(proposal, field, None)
             if value is None:
                 continue
+            if self.patch and component in PATCH_LISTS:
+                value = self._patched(component, value, removals)
             handler(value, proposal)
             state = self.design.components.get(component)
             if state is not None and state.status == ComponentStatus.valid:
                 state.source = self.source
             merged.append(component)
-        self.decisions(getattr(proposal, "decisions", []) or [], merged)
+        self.decisions(getattr(proposal, "decisions", []) or [], merged, removals)
         return self.diagnostics
+
+    def _bounded(
+        self,
+        value: Any,
+        default: int | float,
+        low: int | float,
+        high: int | float,
+        label: str,
+        component: str,
+        meaning: str = "",
+    ) -> Any:
+        """Keep a proposed number in range, and tell the role when its value was changed."""
+        proposed = value if value else default
+        result = _clamp(proposed, low, high)
+        if value and result != proposed:
+            note = f" ({meaning})" if meaning else ""
+            self.diagnostics.append(
+                _diag(
+                    "LIMIT_REJECTED",
+                    f"{label} {proposed} is outside {low}–{high}{note}; ArchAI used {result}",
+                    component,
+                    "warning",
+                )
+            )
+        return result
+
+    def _patched(self, component: str, returned: list[Any], removals: list[str]) -> list[Any]:
+        design_field, kind, prefix = PATCH_LISTS[component]
+        current = [_as_proposal(item, kind) for item in getattr(self.design, design_field)]
+        removed = {slug_id(item, prefix) for item in removals} | {item.lower() for item in removals}
+        by_key: dict[str, Any] = {}
+        for item in [*current, *returned]:
+            by_key[_item_key(item, prefix)] = item
+        return [item for key, item in by_key.items() if key not in removed]
 
     # ------------------------------------------------------------------ cloud, data, resilience
 
@@ -222,7 +321,17 @@ class ProposalMerger:
                     region=self.req.region,
                     partition_key=item.partition_key.strip() or "tenant_id",
                     consistency=item.consistency.strip() or "strong",
-                    retention_days=int(_clamp(item.retention_days or 365, 1, 3650)),
+                    retention_days=int(
+                        self._bounded(
+                            item.retention_days,
+                            365,
+                            1,
+                            3650,
+                            f"{identifier}.retention_days",
+                            "data",
+                            "days",
+                        )
+                    ),
                     owner_service=item.owner_service or None,
                     encryption=item.encryption or "encryption at rest and in transit",
                     backup=item.backup or None,
@@ -272,10 +381,12 @@ class ProposalMerger:
                 )
             )
         baseline = _baseline_services(self.design)
+        added: list[Service] = []
         for kinds in REQUIRED_SERVICE_KINDS:
             if not any(service.kind in kinds for service in services):
                 addition = next(service for service in baseline if service.kind == kinds[0])
                 services.append(addition)
+                added.append(addition)
                 self.diagnostics.append(
                     _diag(
                         "MERGE_ADDED_SERVICE",
@@ -283,6 +394,7 @@ class ProposalMerger:
                         "system",
                     )
                 )
+        _wire_additions(services, added, baseline)
         self.design.services = services
 
     def workflows(self, items: list[Any], proposal: BaseModel) -> None:
@@ -322,7 +434,17 @@ class ProposalMerger:
             ),
             slug_id(item.embedding_model_alias or "enterprise-embedding", ""),
         )
-        size = int(_clamp(item.chunk_size_tokens or 800, 100, 8000))
+        size = int(
+            self._bounded(
+                item.chunk_size_tokens,
+                800,
+                100,
+                8000,
+                "rag.chunk_size_tokens",
+                "rag",
+                "tokens per chunk",
+            )
+        )
         self.design.rag_pipeline = RAGPipeline(
             ingestion_steps=_clean(item.ingestion_steps, 12)
             or ["parse", "chunk", "embed", "index"],
@@ -330,10 +452,18 @@ class ProposalMerger:
             chunk_size_tokens=size,
             chunk_overlap_tokens=int(_clamp(item.chunk_overlap_tokens or 0, 0, size // 2)),
             embedding_model_alias=embedding,
-            embedding_dimensions=int(_clamp(item.embedding_dimensions or 1536, 64, 8192)),
+            embedding_dimensions=int(
+                self._bounded(
+                    item.embedding_dimensions, 1536, 64, 8192, "rag.embedding_dimensions", "rag"
+                )
+            ),
             similarity_metric=item.similarity_metric or "cosine",
             retrieval_mode=item.retrieval_mode,
-            top_k=int(_clamp(item.top_k or 8, 1, 50)),
+            top_k=int(
+                self._bounded(
+                    item.top_k, 8, 1, 50, "rag.top_k", "rag", "passages retrieved per query"
+                )
+            ),
             reranking=item.reranking or "none",
             grounding_policy=item.grounding_policy or "cite retrieved sources",
             freshness=item.freshness or "incremental sync",
@@ -374,8 +504,28 @@ class ProposalMerger:
         broker = self.design.queue_policy.broker if self.design.queue_policy else "managed broker"
         self.design.queue_policy = QueuePolicy(
             broker=broker,
-            max_attempts=int(_clamp(item.max_attempts or 5, 1, 20)),
-            max_age_seconds=int(_clamp(item.max_age_seconds or 3600, 60, 1_209_600)),
+            max_attempts=int(
+                self._bounded(
+                    item.max_attempts,
+                    5,
+                    1,
+                    20,
+                    "queue_policy.max_attempts",
+                    "resilience",
+                    "queue deliveries per job",
+                )
+            ),
+            max_age_seconds=int(
+                self._bounded(
+                    item.max_age_seconds,
+                    3600,
+                    60,
+                    1_209_600,
+                    "queue_policy.max_age_seconds",
+                    "resilience",
+                    "seconds",
+                )
+            ),
             dlq_owner=item.dlq_owner or "operations",
         )
         self.design.resilience = ResiliencePlan(
@@ -394,8 +544,31 @@ class ProposalMerger:
 
     def routing(self, item: Any, proposal: BaseModel) -> None:
         self.design.endpoints = target_endpoints(self.req)
-        chat = [e for e in self.design.endpoints if "embeddings" not in e.modalities]
-        embedding = [e for e in self.design.endpoints if "embeddings" in e.modalities]
+        for requested in getattr(proposal, "endpoints", [])[:8]:
+            endpoint, reason = proposed_endpoint(self.req, self.design.endpoints, requested)
+            if endpoint is not None:
+                self.design.endpoints.append(endpoint)
+                self.diagnostics.append(
+                    _diag(
+                        "ENDPOINT_ADDED",
+                        f"Added {endpoint.id} ({endpoint.deployment_role}, {endpoint.region}) "
+                        f"as proposed: {requested.reason[:160]}",
+                        "routing",
+                    )
+                )
+            elif reason is not None:
+                self.diagnostics.append(
+                    _diag(
+                        "ENDPOINT_REJECTED",
+                        f"Did not add a {requested.purpose} deployment of {requested.provider} "
+                        f"in {requested.region}: {reason}",
+                        "routing",
+                        "warning",
+                    )
+                )
+        serving = [e for e in self.design.endpoints if e.deployment_role == "primary"]
+        chat = [e for e in serving if "embeddings" not in e.modalities]
+        embedding = [e for e in serving if "embeddings" in e.modalities]
 
         def endpoint_for(provider: str) -> str | None:
             wanted = provider.lower().replace("-", " ")
@@ -458,7 +631,16 @@ class ProposalMerger:
                     task=alias.task,
                     endpoint_ids=[primary, *fallbacks],
                     required_capabilities=capabilities,
-                    max_output_tokens=int(_clamp(alias.max_output_tokens or 1024, 64, 65_536)),
+                    max_output_tokens=int(
+                        self._bounded(
+                            alias.max_output_tokens,
+                            1024,
+                            64,
+                            65_536,
+                            f"{identifier}.max_output_tokens",
+                            "routing",
+                        )
+                    ),
                     fallback_endpoint_ids=fallbacks,
                     quality_gate=alias.quality_gate or None,
                 )
@@ -531,12 +713,22 @@ class ProposalMerger:
                     id=identifier,
                     path=path,
                     method=item.method.upper(),
-                    auth=auth,
+                    auth=(getattr(item, "auth", "") or "").strip()[:200] or auth,
                     streaming=bool(item.streaming),
                     summary=item.summary or None,
                     service_id=service_id,
                     scopes=_clean(item.scopes, 6),
-                    rate_limit_rpm=int(_clamp(item.rate_limit_rpm or 600, 1, 1_000_000)),
+                    rate_limit_rpm=int(
+                        self._bounded(
+                            item.rate_limit_rpm,
+                            600,
+                            1,
+                            1_000_000,
+                            f"{identifier}.rate_limit_rpm",
+                            "api",
+                            "requests per minute per principal",
+                        )
+                    ),
                     request_fields=_clean(item.request_fields, 12),
                     response_fields=_clean(item.response_fields, 12),
                 )
@@ -563,12 +755,41 @@ class ProposalMerger:
             monthly_limit=self.req.monthly_budget,
             hard_limit=True,
             unavailable_behavior="reject",
+            enforcement_scope="model-calls",
             allocations=allocations,
-            soft_limit_percent=int(_clamp(item.soft_limit_percent or 80, 50, 100)),
-            per_request_token_ceiling=int(
-                _clamp(item.per_request_token_ceiling or 20_000, 256, 2_000_000)
+            soft_limit_percent=int(
+                self._bounded(
+                    item.soft_limit_percent,
+                    80,
+                    50,
+                    100,
+                    "budget_policy.soft_limit_percent",
+                    "budget",
+                    "percent of the hard limit",
+                )
             ),
-            per_workflow_step_ceiling=int(_clamp(item.per_workflow_step_ceiling or 12, 1, 200)),
+            per_request_token_ceiling=int(
+                self._bounded(
+                    item.per_request_token_ceiling,
+                    20_000,
+                    256,
+                    2_000_000,
+                    "budget_policy.per_request_token_ceiling",
+                    "budget",
+                    "tokens one request may use across its calls and attempts",
+                )
+            ),
+            per_workflow_step_ceiling=int(
+                self._bounded(
+                    item.per_workflow_step_ceiling,
+                    12,
+                    1,
+                    200,
+                    "budget_policy.per_workflow_step_ceiling",
+                    "budget",
+                    "the number of model-calling steps one workflow run may take, not tokens",
+                )
+            ),
             rationale=item.rationale or None,
         )
         total = sum((a.share_percent for a in allocations), Decimal(0))
@@ -602,7 +823,11 @@ class ProposalMerger:
             exact_enabled=bool(item.exact_enabled),
             semantic_enabled=semantic,
             namespace_fields=list(REQUIRED_CACHE_NAMESPACE),
-            ttl_seconds=int(_clamp(item.ttl_seconds or 300, 0, 86_400)),
+            ttl_seconds=int(
+                self._bounded(
+                    item.ttl_seconds, 300, 0, 86_400, "cache_policy.ttl_seconds", "cache", "seconds"
+                )
+            ),
             semantic_similarity_threshold=threshold.quantize(Decimal("0.001"))
             if semantic
             else None,
@@ -631,7 +856,17 @@ class ProposalMerger:
                 audience=flow.audience or f"api://{self.design.project}",
                 scopes=_clean(flow.scopes, 10),
                 pkce=flow.grant_type == "authorization_code_pkce",
-                token_lifetime_minutes=int(_clamp(flow.token_lifetime_minutes or 60, 5, 1440)),
+                token_lifetime_minutes=int(
+                    self._bounded(
+                        flow.token_lifetime_minutes,
+                        60,
+                        5,
+                        1440,
+                        f"{flow.name}.token_lifetime_minutes",
+                        "auth",
+                        "minutes",
+                    )
+                ),
                 notes=flow.notes or None,
             )
             for flow in item.oauth_flows[:8]
@@ -798,7 +1033,17 @@ class ProposalMerger:
                 for metric in item.metrics[:20]
             ],
             dashboards=_clean(item.dashboards, 10),
-            log_retention_days=int(_clamp(item.log_retention_days or 90, 1, 3650)),
+            log_retention_days=int(
+                self._bounded(
+                    item.log_retention_days,
+                    90,
+                    1,
+                    3650,
+                    "observability.log_retention_days",
+                    "observe",
+                    "days",
+                )
+            ),
             sampling=item.sampling or None,
             redaction=item.redaction or None,
         )
@@ -816,15 +1061,25 @@ class ProposalMerger:
             routes_covered=item.routes_covered or "every primary and fallback route",
         )
 
-    def decisions(self, items: list[Any], merged: list[str]) -> None:
+    def decisions(
+        self, items: list[Any], merged: list[str], removals: list[str] | None = None
+    ) -> None:
         if not merged:
             return
+        if self.patch and removals:
+            removed = {item.lower() for item in removals}
+            self.design.decisions = [
+                item
+                for item in self.design.decisions
+                if item.id.lower() not in removed or item.source == designer.FIXED_SOURCE
+            ]
         grouped: dict[str, list[Any]] = {}
         for item in items[:30]:
             component = item.component if item.component in merged else merged[0]
             grouped.setdefault(component, []).append(item)
         for component, decisions in grouped.items():
-            designer.replace_component_decisions(self.design, component)
+            if not self.patch:
+                designer.replace_component_decisions(self.design, component)
             for item in decisions[:4]:
                 add_decision(
                     self.design,
@@ -836,6 +1091,46 @@ class ProposalMerger:
                     item.consequences or None,
                     source=self.source,
                 )
+
+
+def _kind_group(kind: str) -> tuple[str, ...]:
+    return next((kinds for kinds in REQUIRED_SERVICE_KINDS if kind in kinds), (kind,))
+
+
+def _wire_additions(services: list[Service], added: list[Service], template: list[Service]) -> None:
+    """Connect platform services Python added the way its template connects them.
+
+    The template's ids are mapped to the services of the same kind in this design, so an added
+    gateway calls the role's application service rather than a template id that is not there.
+    """
+    if not added:
+        return
+    kinds = {item.id: item.kind for item in template}
+
+    def counterpart(template_id: str) -> str | None:
+        kind = kinds.get(template_id)
+        if kind is None:
+            return template_id  # a data store id; dropped later if it does not exist
+        group = _kind_group(kind)
+        match = next((service for service in services if service.kind in group), None)
+        return match.id if match is not None else None
+
+    for addition in added:
+        addition.depends_on = [
+            target
+            for target in dict.fromkeys(counterpart(item) for item in addition.depends_on)
+            if target is not None and target != addition.id
+        ]
+        for caller in template:
+            if addition.id not in caller.depends_on or caller.kind == addition.kind:
+                continue
+            group = _kind_group(caller.kind)
+            match = next(
+                (service for service in services if service.kind in group and service not in added),
+                None,
+            )
+            if match is not None and addition.id not in match.depends_on:
+                match.depends_on.append(addition.id)
 
 
 def _baseline_services(design: EnterpriseDesign) -> list[Service]:
@@ -851,6 +1146,24 @@ def _baseline_stores(design: EnterpriseDesign) -> dict[str, DataStore]:
     )
     designer.baseline_component(temporary, "data")
     return {store.id: store for store in temporary.data_stores}
+
+
+def _scope_model_budget(design: EnterpriseDesign) -> None:
+    """The limit, currency, and model-call scope come from the requirements.
+
+    The shares are the API role's design choice and stay as proposed; only their amounts are
+    recomputed against the limit.
+    """
+    policy = design.budget_policy
+    if policy is None:
+        return
+    req = design.requirements
+    policy.hard_limit = True
+    policy.unavailable_behavior = "reject"
+    policy.currency = req.currency
+    policy.monthly_limit = req.monthly_budget
+    policy.enforcement_scope = "model-calls"
+    compute_allocations(policy)
 
 
 def enforce_invariants(design: EnterpriseDesign) -> list[ValidationDiagnostic]:
@@ -872,19 +1185,9 @@ def enforce_invariants(design: EnterpriseDesign) -> list[ValidationDiagnostic]:
             )
         service.depends_on = [item for item in dict.fromkeys(resolved) if item != service.id]
         service.data_owned = [item for item in service.data_owned if item in store_ids]
-
-    def first(kinds: set[str]) -> Service | None:
-        return next((service for service in design.services if service.kind in kinds), None)
-
-    chain = (
-        first({"gateway"}),
-        first({"application", "orchestration"}),
-        first({"policy"}),
-        first({"ai-gateway"}),
-    )
-    for source, target in pairwise(chain):
-        if source is not None and target is not None and target.id not in source.depends_on:
-            source.depends_on.append(target.id)
+    # The request path (gateway, application, admission, AI gateway) is not forced here.
+    # Either call direction between admission and the AI gateway is valid, so a broken path is
+    # reported by archai.application.checks and repaired by the role that owns the services.
     for store in design.data_stores:
         if store.owner_service and store.owner_service not in service_ids:
             store.owner_service = None
@@ -912,12 +1215,45 @@ def enforce_invariants(design: EnterpriseDesign) -> list[ValidationDiagnostic]:
         if req.data_classification == "restricted" and design.cache_policy.semantic_enabled:
             design.cache_policy.semantic_enabled = False
     if design.budget_policy:
-        design.budget_policy.hard_limit = True
-        design.budget_policy.unavailable_behavior = "reject"
-        design.budget_policy.currency = req.currency
-        if design.budget_policy.monthly_limit != req.monthly_budget:
-            design.budget_policy.monthly_limit = req.monthly_budget
-            compute_allocations(design.budget_policy)
+        _scope_model_budget(design)
+    if design.resilience:
+        plan = design.resilience.dr_strategy or ""
+        outside = regions_outside(plan, req.data_residency)
+        if not plan.strip() or outside:
+            design.resilience.dr_strategy = recovery_strategy(req)
+            if outside:
+                diagnostics.append(
+                    _diag(
+                        "DR_REGION_REJECTED",
+                        f"The recovery plan named {', '.join(outside)}, outside data residency "
+                        f"({', '.join(req.data_residency)}); ArchAI used its default plan",
+                        "resilience",
+                        "warning",
+                    )
+                )
+        design.resilience.rto_minutes = req.rto_minutes
+        design.resilience.rpo_minutes = req.rpo_minutes
+    for endpoint in design.endpoints:
+        if endpoint.quota_status != "planning":
+            diagnostics.append(
+                _diag(
+                    "QUOTA_PLANNING",
+                    f"{endpoint.id}: RPM, TPM, and context limit are a planning envelope until "
+                    "the requirements include the account quota",
+                    "routing",
+                )
+            )
+        endpoint.quota_status = "planning"
+    added_approvals = ensure_approval_operations(design)
+    if added_approvals:
+        diagnostics.append(
+            _diag(
+                "APPROVAL_INBOX",
+                "Tool side effects require approval: the approvals inbox and decision "
+                "operations were added",
+                "api",
+            )
+        )
     if design.identity_policy:
         claims = list(design.identity_policy.required_claims)
         claims.extend(item for item in REQUIRED_CLAIMS if item not in claims)
@@ -934,6 +1270,7 @@ def enforce_invariants(design: EnterpriseDesign) -> list[ValidationDiagnostic]:
         ids.extend(item for item in REQUIRED_CORRELATION_IDS if item not in ids)
         design.observability.correlation_ids = ids
         design.observability.redaction_required = True
+    attach_recovery_endpoints(design)
     for alias in design.model_aliases:
         if "embeddings" in alias.required_capabilities and alias.fallback_endpoint_ids:
             alias.fallback_endpoint_ids = []
@@ -945,6 +1282,10 @@ def enforce_invariants(design: EnterpriseDesign) -> list[ValidationDiagnostic]:
                     "routing",
                 )
             )
+    for code, message, component in derive_all(design):
+        diagnostics.append(_diag(code, message, component))
+    for code, message, component in align_fixed_facts(design):
+        diagnostics.append(_diag(code, message, component))
     if (
         req.tool_side_effects == "approval"
         and uses_tools(req)

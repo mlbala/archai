@@ -4,6 +4,7 @@ import contextlib
 import difflib
 import json
 import os
+import shlex
 import shutil
 import sys
 from importlib.util import find_spec
@@ -312,17 +313,74 @@ def _latest_run(store: ProjectStore, revision: int | None = None) -> RunState | 
     return max(states, key=lambda state: state.created_at) if states else None
 
 
+def write_decisions_file(store: ProjectStore, design: Any) -> Path | None:
+    """Write the open decisions as a fill-in answers file for `arch update --answers`.
+
+    Answers already written in the file are kept when it is regenerated.
+    """
+    pending = [item for item in design.open_decisions if not item.answer]
+    path: Path = store.root / "decisions.yaml"
+    if not pending:
+        return None
+    kept: dict[str, str] = {}
+    if path.exists():
+        try:
+            existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            for item in existing.get("clarifications") or []:
+                if isinstance(item, dict) and item.get("answer"):
+                    kept[" ".join(str(item.get("question", "")).split()).lower()] = str(
+                        item["answer"]
+                    )
+        except (OSError, yaml.YAMLError):
+            kept = {}
+    lines = [
+        f"# Decisions ArchAI needs from you for `{store.slug}`.",
+        "# Write each answer between the quotes, save, then run:",
+        f"#   arch update {store.slug} --answers {shlex.quote(str(path))}",
+        "# Answers are added to the project's clarifications; the update re-designs the project.",
+        "# A question left with an empty answer stays open.",
+        "clarifications:",
+    ]
+    for item in pending:
+        answer = kept.get(" ".join(item.question.split()).lower(), "")
+        lines.append(f"  - question: {json.dumps(item.question, ensure_ascii=False)}")
+        if item.why:
+            lines.append(f"    # Why it matters: {' '.join(item.why.split())}")
+        if item.options:
+            lines.append(f"    # Options: {' | '.join(' '.join(o.split()) for o in item.options)}")
+        lines.append(f"    answer: {json.dumps(answer, ensure_ascii=False)}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def _print_result(
     store: ProjectStore, revision: int, bundle: Path, manifest: ExportBundleManifest
 ) -> None:
-    console.print(f"[green]Accepted revision {revision}[/green] for `{store.slug}`")
     try:
         design = store.load_design(revision)
         revision_manifest = store.load_manifest(revision)
+        draft = any(
+            item.severity == "blocking" and not item.resolved for item in design.verification
+        )
+        if draft:
+            console.print(
+                f"[yellow]Saved draft revision {revision}[/yellow] for `{store.slug}`: review "
+                "findings are still open"
+            )
+        else:
+            console.print(f"[green]Accepted revision {revision}[/green] for `{store.slug}`")
+        decisions = write_decisions_file(store, design)
         print_summary(
-            console, design, revision_manifest, bundle, manifest, _latest_run(store, revision)
+            console,
+            design,
+            revision_manifest,
+            bundle,
+            manifest,
+            _latest_run(store, revision),
+            decisions_file=decisions,
         )
     except (OSError, PydanticValidationError) as exc:  # pragma: no cover - defensive display
+        console.print(f"Saved revision {revision} for `{store.slug}`")
         console.print(f"Export bundle: {bundle} ({exc})")
     failed = [item for item in manifest.artifacts if item.status == "failed"]
     if failed:
@@ -646,7 +704,7 @@ def update(
     non_interactive: Annotated[bool, typer.Option("--non-interactive")] = False,
     offline: Annotated[bool, typer.Option("--offline")] = False,
     output_dir: OutputDir = None,
-    formats: Annotated[str, typer.Option("--formats")] = "core",
+    formats: Annotated[str, typer.Option("--formats")] = "all",
 ) -> None:
     """Create a new revision of the complete design from changed requirements."""
     _execute_generation(
@@ -1198,7 +1256,7 @@ def model_use(
     role: Annotated[
         str | None,
         typer.Option(
-            "--role", help="Only this role: requirements, cloud, api, security, verifier."
+            "--role", help="Only this role: requirements, planner, cloud, api, security, verifier."
         ),
     ] = None,
     key: Annotated[

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
@@ -19,6 +20,28 @@ SYSTEM_INSTRUCTION = (
 class Usage:
     input_tokens: int | None
     output_tokens: int | None
+    # Part of input_tokens the provider served from its prompt cache, when it reports it.
+    cached_input_tokens: int | None = None
+
+
+# Prompts put stable instructions first and the run's data after this marker, so a provider
+# can cache the stable part across the calls of one role.
+CONTEXT_MARKER = "\n# Context\n"
+MIN_CACHEABLE_CHARS = 4_000  # about 1,000 tokens, the smallest prefix providers cache
+
+
+def split_cacheable(prompt: str) -> tuple[str, str]:
+    """Return (stable instructions, run data); the first part is empty when nothing is cacheable."""
+    index = prompt.find(CONTEXT_MARKER)
+    if index < MIN_CACHEABLE_CHARS:
+        return "", prompt
+    return prompt[:index], prompt[index:]
+
+
+def cache_key(prompt: str) -> str:
+    """A key that is the same for every call sharing the stable instructions."""
+    prefix, _ = split_cacheable(prompt)
+    return "archai-" + hashlib.sha256(prefix.encode("utf-8")).hexdigest()[:24]
 
 
 @dataclass(frozen=True)

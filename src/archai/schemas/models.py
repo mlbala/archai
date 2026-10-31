@@ -195,6 +195,10 @@ class TargetEndpoint(StrictModel):
     output_price_per_million: Decimal | None = Field(default=None, ge=0)
     rpm: int = Field(gt=0)
     tpm: int = Field(gt=0)
+    # planning = derived from stated traffic; confirmed = an account quota the requirements supplied
+    quota_status: Literal["planning", "confirmed"] = "planning"
+    # recovery = a standby deployment in another allowed region, used only after regional failover
+    deployment_role: Literal["primary", "recovery"] = "primary"
 
 
 class ModelAlias(StrictModel):
@@ -204,6 +208,8 @@ class ModelAlias(StrictModel):
     required_capabilities: list[str] = Field(default_factory=list)
     max_output_tokens: int | None = Field(default=None, gt=0)
     fallback_endpoint_ids: list[str] = Field(default_factory=list)
+    # Standby endpoints the recovery deployment uses; never a runtime fallback.
+    recovery_endpoint_ids: list[str] = Field(default_factory=list)
     quality_gate: str | None = None
 
 
@@ -277,6 +283,7 @@ class BudgetPolicy(StrictModel):
     monthly_limit: Decimal = Field(gt=0)
     hard_limit: bool = True
     unavailable_behavior: Literal["reject", "soft-allow"] = "reject"
+    enforcement_scope: Literal["model-calls"] = "model-calls"
     hierarchy: list[str] = Field(
         default_factory=lambda: ["organization", "department", "application"]
     )
@@ -459,12 +466,74 @@ class ArchitectureDecision(StrictModel):
     source: str = "deterministic-baseline"
 
 
+class PlannedService(StrictModel):
+    id: str
+    name: str
+    kind: str
+    purpose: str
+    depends_on: list[str] = Field(default_factory=list)
+
+
+class PlannedInterface(StrictModel):
+    source: str
+    target: str
+    style: str
+    purpose: str
+
+
+class PlannedChoice(StrictModel):
+    component: str
+    choice: str
+    reason: str
+
+
+class ArchitecturePlan(StrictModel):
+    """The chief architect's plan that the specialist roles design from."""
+
+    style: str
+    summary: str
+    services: list[PlannedService] = Field(default_factory=list)
+    interfaces: list[PlannedInterface] = Field(default_factory=list)
+    key_choices: list[PlannedChoice] = Field(default_factory=list)
+    default_changes: list[PlannedChoice] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    source: str | None = None
+
+
+class AcceptanceCriterion(StrictModel):
+    """One check the design must pass, derived from the requirements or the PRD."""
+
+    id: str
+    source: Literal["requirement", "prd", "journey"]
+    text: str
+    components: list[str] = Field(default_factory=list)
+    status: Literal["pending", "pass", "fail"] = "pending"
+    evidence: str | None = None
+
+
+class OpenDecision(StrictModel):
+    """A business choice the verifier found that only the stakeholders can make."""
+
+    id: str
+    question: str
+    why: str
+    options: list[str] = Field(default_factory=list)
+    components: list[str] = Field(default_factory=list)
+    answer: str | None = None
+
+
 class VerificationFinding(StrictModel):
     severity: Literal["blocking", "warning", "info"]
     component: str
     issue: str
     recommendation: str
     resolved: bool = False
+    id: str | None = None
+    # Design fields the verifier says the fix must change.
+    fields: list[str] = Field(default_factory=list)
+    # Components whose owners were asked to change, resolved from component and fields.
+    components: list[str] = Field(default_factory=list)
+    repairs: int = 0
 
 
 class ComponentState(StrictModel):
@@ -569,6 +638,7 @@ class EnterpriseDesign(StrictModel):
     project: str
     requirements: RequirementsSpec
     prd: PRD | None = None
+    architecture_plan: ArchitecturePlan | None = None
     services: list[Service] = Field(default_factory=list)
     api_contracts: list[APIContract] = Field(default_factory=list)
     data_stores: list[DataStore] = Field(default_factory=list)
@@ -595,12 +665,18 @@ class EnterpriseDesign(StrictModel):
     decisions: list[ArchitectureDecision] = Field(default_factory=list)
     verification: list[VerificationFinding] = Field(default_factory=list)
     verification_summary: str | None = None
+    acceptance: list[AcceptanceCriterion] = Field(default_factory=list)
+    open_decisions: list[OpenDecision] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def references_exist(self) -> EnterpriseDesign:
         endpoint_ids = {endpoint.id for endpoint in self.endpoints}
         for alias in self.model_aliases:
-            unknown = (set(alias.endpoint_ids) | set(alias.fallback_endpoint_ids)) - endpoint_ids
+            unknown = (
+                set(alias.endpoint_ids)
+                | set(alias.fallback_endpoint_ids)
+                | set(alias.recovery_endpoint_ids)
+            ) - endpoint_ids
             if unknown:
                 raise ValueError(
                     f"alias {alias.id} references unknown endpoints: {sorted(unknown)}"
@@ -658,6 +734,7 @@ class RoleCallRecord(StrictModel):
     seconds: float = 0
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cached_input_tokens: int | None = None
     error: str | None = None
 
 

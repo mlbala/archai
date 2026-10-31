@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -24,6 +25,7 @@ from archai.schemas.models import (
     ComponentStatus,
     EnterpriseDesign,
     ExportBundleManifest,
+    OpenDecision,
     RevisionManifest,
     RunState,
 )
@@ -154,6 +156,7 @@ class RichInterviewer:
         suggestions: dict[str, Suggestion],
         clarifying_questions: list[str],
         persist: Callable[[dict[str, Any]], None],
+        confirmed: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         session = InterviewSession(
             self.io,
@@ -161,6 +164,7 @@ class RichInterviewer:
             suggestions=suggestions,
             clarifying_questions=clarifying_questions,
             persist=persist,
+            confirmed=confirmed,
         )
         if self.progress is not None:
             self.progress.pause()
@@ -185,6 +189,37 @@ class RichInterviewer:
         finally:
             if self.progress is not None:
                 self.progress.resume()
+
+    def decide(self, decisions: list[OpenDecision]) -> dict[str, str]:
+        """Ask the person running ArchAI the business questions the design review raised."""
+        answers: dict[str, str] = {}
+        if self.progress is not None:
+            self.progress.pause()
+        try:
+            self.io.section("Decisions for you")
+            self.io.info(
+                "The design review found choices only you can make. Type an answer or an "
+                "option number, or press Enter to leave it open for later."
+            )
+            for decision in decisions[:4]:
+                reply = self.io.ask(
+                    label=decision.id,
+                    prompt=decision.question,
+                    help_text=decision.why,
+                    choices=decision.options,
+                    default=None,
+                    hint=None,
+                    critical=False,
+                ).strip()
+                if reply.lower() in {"", "skip", "save", "none"}:
+                    continue
+                if reply.isdigit() and 1 <= int(reply) <= len(decision.options):
+                    reply = decision.options[int(reply) - 1]
+                answers[decision.id] = reply
+        finally:
+            if self.progress is not None:
+                self.progress.resume()
+        return answers
 
 
 # ---------------------------------------------------------------- live status
@@ -318,6 +353,7 @@ def print_summary(
     bundle: Path,
     export: ExportBundleManifest,
     run: RunState | None,
+    decisions_file: Path | None = None,
 ) -> None:
     console.print(component_table(design, f"Revision {revision_manifest.revision} components"))
     generated = [item for item in export.artifacts if item.status == "generated"]
@@ -333,14 +369,23 @@ def print_summary(
         item.path for item in generated if item.path.startswith(("infrastructure/", "workloads/"))
     ]
     errors = [d for d in revision_manifest.diagnostics if d.severity == "error"]
-    warnings = [d for d in revision_manifest.diagnostics if d.severity == "warning"]
+    warnings = [
+        d
+        for d in revision_manifest.diagnostics
+        if d.severity == "warning" and d.code != "VERIFIER_UNRESOLVED"
+    ]
+    open_findings = [
+        item for item in design.verification if item.severity == "blocking" and not item.resolved
+    ]
+    if revision_manifest.project_complete:
+        status = "[green]complete design[/green]"
+    elif open_findings:
+        status = f"[yellow]draft · {len(open_findings)} review findings open[/yellow]"
+    else:
+        status = "[yellow]partial design[/yellow]"
     lines = [
         f"[bold]Project[/bold] {design.project} · revision {revision_manifest.revision} · "
-        + (
-            "[green]complete design[/green]"
-            if revision_manifest.project_complete
-            else "[yellow]partial design[/yellow]"
-        ),
+        + status,
         f"[bold]Folder[/bold] {bundle}",
         f"[bold]Artifacts[/bold] {len(docs)} documents · {len(pdfs)} PDFs · "
         f"{len(diagrams)} diagram files · {len(infra)} IaC/workload files"
@@ -348,12 +393,28 @@ def print_summary(
         f"[bold]Validation[/bold] {len(errors)} errors · {len(warnings)} warnings · "
         f"{len(design.verification)} verifier findings",
     ]
+    if design.acceptance:
+        passed = sum(1 for item in design.acceptance if item.status == "pass")
+        failing = sum(1 for item in design.acceptance if item.status == "fail")
+        lines.append(
+            f"[bold]Acceptance[/bold] {passed} of {len(design.acceptance)} criteria pass"
+            + (f" · [yellow]{failing} fail[/yellow]" if failing else "")
+        )
+    pending = [item for item in design.open_decisions if not item.answer]
+    answered = [item for item in design.open_decisions if item.answer]
+    if design.open_decisions:
+        lines.append(
+            f"[bold]Decisions[/bold] {len(answered)} answered · "
+            + (f"[yellow]{len(pending)} waiting for you[/yellow]" if pending else "none waiting")
+        )
     if run and run.role_calls:
         tokens = sum((c.input_tokens or 0) + (c.output_tokens or 0) for c in run.role_calls)
+        cached = sum(c.cached_input_tokens or 0 for c in run.role_calls)
         models = sorted({f"{c.provider}:{c.model}" for c in run.role_calls})
         lines.append(
             f"[bold]Architect models[/bold] {', '.join(models)} · {len(run.role_calls)} calls · "
             f"{tokens / 1000:.1f}k tokens"
+            + (f" ({cached / 1000:.1f}k served from the provider cache)" if cached else "")
         )
     elif run:
         lines.append(
@@ -373,14 +434,39 @@ def print_summary(
             shown = True
     if not shown and pdfs:
         lines.append(f"[bold]Open[/bold] {bundle / pdfs[0]}")
+    if open_findings:
+        lines.append(
+            "[bold]Review[/bold] The repair limit was reached with these findings open. Fix one "
+            "by re-running the component it names, for example "
+            f"`arch {open_findings[0].component} -p {design.project}`, or keep it as a known issue."
+        )
     console.print(
         Panel(
             "\n".join(lines),
-            title="[bold green]Design saved[/bold green]",
-            border_style="green",
+            title="[bold yellow]Draft saved[/bold yellow]"
+            if open_findings
+            else "[bold green]Design saved[/bold green]",
+            border_style="yellow" if open_findings else "green",
             title_align="left",
         )
     )
+    for finding in open_findings[:8]:
+        issue = finding.issue if len(finding.issue) <= 240 else finding.issue[:237] + "…"
+        console.print(f"[yellow]open[/yellow] {finding.component}: {issue}")
+    if len(open_findings) > 8:
+        console.print(
+            f"[dim]… {len(open_findings) - 8} more open findings in validation_report.json[/dim]"
+        )
+    for decision in pending[:4]:
+        console.print(f"[magenta]decision[/magenta] {decision.id}: {decision.question}")
+    if pending and decisions_file is not None:
+        # soft_wrap keeps the path on one line so it can be copied.
+        console.print(f"[dim]Write your answers in:[/dim] {decisions_file}", soft_wrap=True)
+        console.print(
+            f"[dim]Then run (this re-designs the project):[/dim] arch update {design.project} "
+            f"--answers {shlex.quote(str(decisions_file))}",
+            soft_wrap=True,
+        )
     for item in warnings[:6]:
         console.print(f"[yellow]warning[/yellow] {item.component or ''} {item.message}")
     if len(warnings) > 6:

@@ -1,0 +1,105 @@
+flowchart TD
+  start["arch auto, arch update, arch resume, or one component command"] --> dry{"--dry-run?"}
+  dry -->|yes| plan["Print the plan: scope, roles, documents. No writes and no model calls."]
+  plan --> stopPlan(["Stop"])
+  dry -->|no| openRun["Open run.json with status running"]
+
+  openRun --> mergeIn["Merge files, --idea, stdin, --answers, and flags onto the latest requirements"]
+  mergeIn --> hasTeam{"Prose to analyze, and a model team is configured?"}
+
+  hasTeam -->|yes| intake["Enterprise Requirements Architect<br/>Intake<br/>Read the description, suggest answers, write clarifying questions"]
+  hasTeam -->|no| askMode{"Interactive terminal?"}
+  intake --> intakeOk{"Intake call"}
+  intakeOk -->|ok| askMode
+  intakeOk -->|"provider failed, not fatal"| intakeSkip["Skip intake and continue with the given answers"]
+  intakeSkip --> askMode
+  intakeOk -->|fatal| failed(["Run status failed"])
+
+  askMode -->|yes| interview["Interview<br/>Suggested answers, clarifying questions, optional parts, then a review table<br/>Enter or none accepts the fit. skip leaves an optional answer blank. back, ?, save"]
+  askMode -->|no| quoted["Non-interactive: keep explicit answers. Apply only suggestions quoted in the source when --allow-assumptions is set"]
+  interview -->|"save, interrupt, or end of input"| paused(["Status interviewing. Resume with arch resume"])
+  interview --> parse["Parse and validate RequirementsSpec"]
+  quoted --> parse
+
+  parse --> complete{"Required answers present and valid?"}
+  complete -->|"missing, interactive"| fixAsk["Ask the missing fields again, up to 4 rounds"]
+  fixAsk --> parse
+  complete -->|"missing, not interactive"| blocked(["Status blocked. Resume with the printed run id"])
+  complete -->|yes| baseline["Deterministic baseline for every component in scope"]
+
+  baseline --> applicability["Mark excluded parts not applicable: cache, auth, infra, rag, observe, eval, workflow, guard, resilience<br/>Leave a whole locked component unchanged"]
+  applicability --> teamMode{"Model team configured?"}
+
+  teamMode -->|"offline or no API key"| cost["Capacity and cost engine, deterministic, when cost is in scope"]
+  teamMode -->|yes| needPrd{"requirements is in scope, unlocked, and applicable?"}
+
+  needPrd -->|yes| prd["Enterprise Requirements Architect<br/>PRD<br/>Summary, goals, personas, journeys, functional and non-functional requirements"]
+  needPrd -->|no| needCloud{"Any cloud component active?"}
+  prd --> mergePrd["Merge the PRD into the design"]
+  mergePrd --> needCloud
+
+  needCloud -->|yes| cloud["Cloud, Data, and Resilience Architect<br/>system, data, workflow, rag, infra, resilience<br/>Only the active ones in this scope"]
+  needCloud -->|no| needApi{"Any API component active?"}
+  cloud --> mergeCloud["Merge the proposal: normalize ids, drop dangling references, clamp values"]
+  mergeCloud --> needApi
+
+  needApi -->|yes| api["API Management and AI Routing Architect<br/>api, routing, budget, cache<br/>Uses the services from the cloud role"]
+  needApi -->|no| needSec{"Any security component active?"}
+  api --> mergeApi["Merge the proposal"]
+  mergeApi --> needSec
+
+  needSec -->|yes| security["Identity, Security, and Observability Architect<br/>auth, guard, security, observe, eval<br/>Uses the OAuth scopes on the API contracts"]
+  needSec -->|no| invariants["Enforce policy invariants in Python"]
+  security --> mergeSec["Merge the proposal"]
+  mergeSec --> invariants
+
+  invariants --> needVerify{"Any of those components were designed?"}
+  needVerify -->|no| cost
+  needVerify -->|yes| verify["Design Verifier and Compiler<br/>Cross-check the design, requirements, and deterministic diagnostics"]
+
+  verify --> verifyOk{"Verifier call"}
+  verifyOk -->|"provider failed, not fatal"| verifySkip["Skip the remaining verification passes"]
+  verifySkip --> cost
+  verifyOk -->|fatal| failed
+  verifyOk -->|ok| blocking{"Blocking findings?"}
+
+  blocking -->|none| cost
+  blocking -->|"only disputes values from the requirements"| keepWarning["Keep as a warning<br/>No role can change a fixed fact"]
+  keepWarning --> cost
+  blocking -->|yes| revise["Send each finding to every role that owns a field it names, PRD included<br/>Roles run one at a time and edit their current content"]
+  revise --> confirm["Verifier reviews the revised design<br/>It marks a repeat of an earlier finding with same_as"]
+  confirm --> still{"Blocking findings still open?"}
+  still -->|no| cost
+  still -->|yes, another repair pass is allowed| revise
+  still -->|"repair limit, call budget, or every open finding already repaired twice"| draft["Save the revision as a draft<br/>Open findings stay on the revision and are listed by the CLI"]
+  draft --> cost
+
+  cost --> invariants2["Enforce invariants again"]
+  invariants2 --> manual["Reapply saved manual decisions"]
+  manual --> locks["Restore locked components from the previous revision"]
+  locks --> graph["Build the architecture graph"]
+  graph --> validate{"Validation errors?"}
+  validate -->|yes| failed
+  validate -->|no| commit["Commit the next immutable revision<br/>enterprise_design.json, architecture graph, component Markdown, manifest"]
+
+  commit --> export["Export the project folder"]
+  export --> outJson["JSON state: design, graph, validation report, gateway and cost config when those components exist"]
+  outJson --> accepted(["Run status accepted. Print the revision and export path"])
+  export --> outMd["Markdown: component documents, Master Design, High-Level Design, Low-Level Design"]
+  export --> outMmd["Mermaid diagrams for the views this design contains"]
+  export --> outCfg["YAML policies, LiteLLM config when routing exists, Azure APIM XML when the profile is Azure and APIs exist"]
+  export --> outTf["Terraform when infra is in scope and the profile is not agnostic"]
+  export --> outPdf["PDF for each Markdown document when the renderer is installed"]
+  outMd --> accepted
+  outMmd --> accepted
+  outCfg --> accepted
+  outTf --> accepted
+  outPdf --> accepted
+
+  callRules["Each model call uses structured JSON on OpenAI, Anthropic, Gemini, or DeepSeek.<br/>run.json stores role, step, provider, model, status, duration, and token counts. Prompts are not stored.<br/>One shared call and token budget. A quota, outage, or credential failure retries once on another configured provider, then that provider is skipped for the rest of the run.<br/>Any other non-fatal failure keeps that role's deterministic baseline and records a warning."]
+  intake -.-> callRules
+  prd -.-> callRules
+  cloud -.-> callRules
+  api -.-> callRules
+  security -.-> callRules
+  verify -.-> callRules
